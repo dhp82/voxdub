@@ -55,6 +55,12 @@ def source_video_path(work_dir: str) -> str | None:
     return None
 
 
+def _usage_snapshot() -> dict:
+    """Số request/token đã tiêu cho lượt dịch của video này."""
+    from autodub.text.translate_common import USAGE
+    return USAGE.snapshot()
+
+
 @dataclass
 class DubRequest:
     """Everything needed for one dubbing run (Vietnamese)."""
@@ -680,6 +686,8 @@ class DubPipeline:
         # này (không ghi ra .env).
         from autodub.text.translate_analysis import (analyze_transcript,
                                                      apply_analysis)
+        from autodub.text.translate_common import USAGE
+        USAGE.reset()      # đếm token của riêng video này, từ phân tích trở đi
         cache = data_path(work_dir, "video_context.json") if work_dir else None
         analysis = analyze_transcript(segments, source_lang, engine, settings,
                                       cache_path=cache)
@@ -688,15 +696,21 @@ class DubPipeline:
         _key, _url, model = effective.translate_credentials(engine)
         rep.emit("translate", "start", detail=f"{name}: {model}")
         logger.info(f"Đang dịch {len(segments)} câu sang tiếng Việt...")
+        # Sổ tạm theo lô: hết hạn mức ở lô 40/50 thì lần chạy lại chỉ dịch
+        # nốt 10 lô cuối. Dịch trọn vẹn thì sổ tự xóa.
+        ckpt = (data_path(work_dir, "translate_checkpoint.json")
+                if work_dir else None)
         try:
             if engine == "gemini":
                 from autodub.text.translate_gemini import translate_segments
                 result = translate_segments(segments, target, source_lang,
-                                            effective, rep)
+                                            effective, rep,
+                                            checkpoint_path=ckpt)
             else:
                 from autodub.text.translate_openai import translate_segments
                 result = translate_segments(segments, target, source_lang,
-                                            effective, rep, engine=engine)
+                                            effective, rep, engine=engine,
+                                            checkpoint_path=ckpt)
         except PipelineCancelled:
             raise
         except Exception as e:
@@ -714,6 +728,13 @@ class DubPipeline:
             raise
         except Exception as e:
             logger.warning(f"Rà soát bản dịch lỗi ({e}) — dùng bản lượt đầu")
+        usage = _usage_snapshot()
+        if usage["requests"]:
+            logger.info(
+                f"Lượt dịch dùng {usage['requests']} lượt gọi, "
+                f"{usage['total_tokens']:,} token "
+                f"(gửi {usage['prompt_tokens']:,}, "
+                f"nhận {usage['completion_tokens']:,})")
         return result
 
     def _load_translation(
@@ -1140,7 +1161,6 @@ class DubPipeline:
         # này ĐÃ nằm trên timeline kéo dài (video chậm xong rồi) nên không
         # nhân thêm 1/video_speed — không thì câu vừa khít vẫn bị báo oan.
         cps = effective_cps(settings, video_slowdown_pending=False)
-
         timing = timing_report.to_dict() if timing_report is not None else {}
         by_id = {d.get("id"): d for d in timing.get("details", [])}
 
@@ -1173,6 +1193,10 @@ class DubPipeline:
                 "total_overlap_s": timing.get("total_overlap_s", 0.0),
                 "segments_over_budget": over_budget,
             },
+            # Token đã tiêu cho video này (phân tích + dịch + rà soát) —
+            # người dùng trả tiền theo con số này nhưng không thấy nó ở đâu
+            # khác. Video dịch tay hoặc chạy lại từ cache thì toàn số 0.
+            "translate_usage": _usage_snapshot(),
             "hint": ("Câu 'overlap_prev_s' là chồng tiếng còn lại — rút gọn "
                      "bản dịch câu đó trong tab Chỉnh sửa, hoặc hạ "
                      "VIDEO_SPEED rồi chạy lại. Câu 'over_budget_chars' nên "

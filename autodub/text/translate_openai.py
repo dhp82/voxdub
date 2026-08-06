@@ -18,7 +18,9 @@ from autodub.languages import TargetLang
 from autodub.progress import ProgressReporter
 from autodub.text.translate_common import (
     RateLimited,
+    TranslateCheckpoint,
     TranslateError,
+    USAGE,
     contains_cjk,
     merge_translations,
     parse_response_segments,
@@ -180,11 +182,16 @@ def chat(settings, engine: str, system: str, user: str, max_retries: int,
 def _read_reply(resp, name: str) -> str:
     """Lấy phần chữ trong một phản hồi 200, kèm các lỗi thường gặp."""
     try:
-        choice = resp.json()["choices"][0]
+        data = resp.json()
+        choice = data["choices"][0]
         content = choice["message"]["content"]
     except (ValueError, KeyError, IndexError) as e:
         raise TranslateError(
             f"{name} trả về phản hồi không đúng định dạng: {e}") from e
+    usage = data.get("usage") or {}
+    if usage:
+        USAGE.add(usage.get("prompt_tokens", 0),
+                  usage.get("completion_tokens", 0))
     if not str(content).strip():
         raise TranslateError(f"{name} trả về nội dung rỗng")
     if choice.get("finish_reason") == "length":
@@ -353,12 +360,14 @@ def _translate_resilient(batch: list[dict], target: TargetLang,
 def translate_segments(segments: list[dict], target: TargetLang,
                        source_lang: str, settings,
                        reporter: ProgressReporter | None = None,
-                       engine: str | None = None) -> list[dict]:
+                       engine: str | None = None,
+                       checkpoint_path: str | None = None) -> list[dict]:
     """Dịch toàn bộ câu, theo từng lô.
 
-    Trả về danh sách mới đã có ``target.text_field``. Không ghi gì xuống đĩa —
-    lớp gọi chỉ lưu khi cả lượt dịch thành công, nên hỏng giữa chừng không để
-    lại thư mục dự án dở dang.
+    Trả về danh sách mới đã có ``target.text_field``. Tệp kết quả cuối vẫn do
+    lớp gọi ghi khi cả lượt thành công; ở đây chỉ ghi sổ tạm
+    ``checkpoint_path`` sau mỗi lô để hỏng giữa chừng (hết hạn mức, rớt mạng)
+    thì chạy lại không phải dịch lại các lô đã xong.
     """
     if not segments:
         raise TranslateError("Không có câu nào để dịch")
@@ -370,6 +379,7 @@ def translate_segments(segments: list[dict], target: TargetLang,
     batch_size = max(1, int(settings.translate_batch_size))
     total = len(segments)
     batches = [segments[i:i + batch_size] for i in range(0, total, batch_size)]
+    checkpoint = TranslateCheckpoint(checkpoint_path, target.text_field)
     # Các lô độc lập nhau — gửi song song thay vì chờ từng lô. Trần 8 để vẫn
     # nằm dưới giới hạn tốc độ của các gói miễn phí (~20 request/phút).
     workers = min(max(1, int(settings.parallel_workers)), len(batches), 8)
@@ -378,14 +388,22 @@ def translate_segments(segments: list[dict], target: TargetLang,
 
     from concurrent.futures import ThreadPoolExecutor
 
+    def _run_batch(batch: list[dict], ctx: list[dict]) -> list[dict]:
+        cached = checkpoint.take(batch)
+        if cached is not None:
+            return cached
+        merged = _translate_resilient(batch, target, source_lang, settings,
+                                      engine, ctx)
+        checkpoint.put(merged)
+        return merged
+
     done_count = 0
     pool = ThreadPoolExecutor(max_workers=workers)
     try:
         # Chạy song song nên chưa có bản dịch của lô trước — kèm 3 câu GỐC
         # liền trước làm ngữ cảnh để không đứt mạch giữa hai lô.
         futures = [
-            pool.submit(_translate_resilient, b, target, source_lang, settings,
-                        engine, context_payload(segments, i * batch_size))
+            pool.submit(_run_batch, b, context_payload(segments, i * batch_size))
             for i, b in enumerate(batches)
         ]
         results: list[list[dict]] = []
@@ -405,4 +423,5 @@ def translate_segments(segments: list[dict], target: TargetLang,
     else:
         pool.shutdown(wait=True)
 
+    checkpoint.discard()
     return [seg for batch in results for seg in batch]

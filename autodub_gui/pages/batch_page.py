@@ -6,6 +6,7 @@ bộ nhớ. Điều này được nói rõ trên giao diện.
 """
 from __future__ import annotations
 
+import json
 import os
 
 from PySide6.QtCore import Qt, QTimer, Signal
@@ -16,6 +17,7 @@ from PySide6.QtWidgets import (
 
 from autodub.batch import BatchItem
 from autodub.pipeline import DubRequest
+from autodub.utils import save_json_atomic
 from autodub_gui import dub_constants as consts
 from autodub_gui import icons, tokens
 from autodub_gui.pages import BasePage
@@ -63,6 +65,8 @@ _STATUS_VIEW: dict[str, tuple[str, str, str]] = {
 _PAUSE_TOOLTIP = ("Dừng lại — video đang xử lý sẽ tiếp tục từ chỗ dừng khi "
                   "bạn chạy lại, phần đã làm không mất.")
 
+QUEUE_FILE = "batch_queue.json"     # danh sách chờ, sống qua các lần mở app
+
 
 class BatchPage(BasePage):
     """Danh sách video chờ lồng tiếng."""
@@ -86,7 +90,59 @@ class BatchPage(BasePage):
         self._rows: dict[str, int] = {}
         self._build()
         self.setAcceptDrops(True)
+        self._load_queue()
         self._refresh_table()
+
+    # -- Lưu hàng chờ qua các lần mở app -------------------------------
+    def _queue_path(self) -> str:
+        from autodub_gui.pages.new_project_page import cache_dir
+        return os.path.join(cache_dir(), QUEUE_FILE)
+
+    def _load_queue(self) -> None:
+        """Đọc lại danh sách chờ của lần trước — tắt app không mất hàng chờ."""
+        try:
+            with open(self._queue_path(), encoding="utf-8") as f:
+                data = json.load(f)
+        except (OSError, ValueError):
+            return
+        if not isinstance(data, dict) or not isinstance(data.get("items"), list):
+            return
+        for entry in data["items"]:
+            if not isinstance(entry, dict):
+                continue
+            url = entry.get("url") or None
+            file_path = entry.get("file_path") or None
+            if file_path and not os.path.isfile(file_path):
+                continue           # tệp đã bị xóa/di chuyển thì bỏ dòng đó
+            if not url and not file_path:
+                continue
+            item = BatchItem(url=url, file_path=file_path)
+            if item.key in self._state:
+                continue
+            self._items.append(item)
+            state = entry.get("state")
+            # Dòng đang chạy dở lúc tắt app coi như "Đã dừng" — chạy lại sẽ
+            # tiếp tục từ chỗ dừng nhờ thư mục dự án còn nguyên.
+            if state == RUNNING:
+                state = PAUSED
+            self._state[item.key] = (state if state in (WAITING, DONE, FAILED,
+                                                        PAUSED) else WAITING)
+            if self._state[item.key] == DONE:
+                self._percent[item.key] = 100
+            detail = entry.get("detail")
+            if detail:
+                self._detail[item.key] = str(detail)
+
+    def _save_queue(self) -> None:
+        """Ghi danh sách chờ xuống đĩa (nguyên tử) mỗi khi nó thay đổi."""
+        items = [{"url": it.url, "file_path": it.file_path,
+                  "state": self._state.get(it.key, WAITING),
+                  "detail": self._detail.get(it.key, "")}
+                 for it in self._items]
+        try:
+            save_json_atomic({"items": items}, self._queue_path())
+        except OSError:
+            pass      # không lưu được hàng chờ thì cũng không cản việc chính
 
     # -- Dựng giao diện ------------------------------------------------
     def _build(self) -> None:
@@ -387,6 +443,7 @@ class BatchPage(BasePage):
             self._fill_status_cells(item.key, row)
         self.table.auto_state()
         self._refresh_summary()
+        self._save_queue()
 
     def _video_cell(self, item: BatchItem) -> QWidget:
         """Ô đầu tiên: tên video và dòng mô tả nguồn."""
@@ -641,6 +698,9 @@ class BatchPage(BasePage):
         elif state == DONE:
             self._percent[key] = 100
         self._update_row(key)
+        # Lưu ngay khi một video đổi trạng thái (không lưu theo từng phần
+        # trăm) — app có bị tắt ngang thì hàng chờ vẫn đúng tới video đó.
+        self._save_queue()
 
     def _on_finished(self, summary) -> None:
         REGISTRY.finish_job(True,

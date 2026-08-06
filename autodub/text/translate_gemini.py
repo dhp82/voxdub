@@ -29,7 +29,9 @@ from autodub.languages import TargetLang
 from autodub.progress import ProgressReporter
 from autodub.text.translate_common import (
     RateLimited,
+    TranslateCheckpoint,
     TranslateError,
+    USAGE,
     contains_cjk,
     merge_translations,
     parse_response_segments,
@@ -112,6 +114,10 @@ def _reply_text(resp) -> str:
         text = (resp.text or "").strip()
     except Exception:      # SDK ném khi phản hồi không có phần chữ nào
         text = ""
+    meta = getattr(resp, "usage_metadata", None)
+    if meta is not None:
+        USAGE.add(getattr(meta, "prompt_token_count", 0) or 0,
+                  getattr(meta, "candidates_token_count", 0) or 0)
     if text:
         return text
 
@@ -417,14 +423,20 @@ def _translate_resilient(batch: list[dict], target: TargetLang,
 
 def translate_segments(segments: list[dict], target: TargetLang,
                        source_lang: str, settings,
-                       reporter: ProgressReporter | None = None) -> list[dict]:
-    """Dịch toàn bộ câu, theo từng lô, bằng Gemini."""
+                       reporter: ProgressReporter | None = None,
+                       checkpoint_path: str | None = None) -> list[dict]:
+    """Dịch toàn bộ câu, theo từng lô, bằng Gemini.
+
+    ``checkpoint_path``: sổ tạm ghi sau mỗi lô — chạy lại sau khi hỏng giữa
+    chừng thì các lô đã dịch được đọc lại thay vì gọi API lần nữa.
+    """
     if not segments:
         raise TranslateError("Không có câu nào để dịch")
 
     batch_size = max(1, int(settings.translate_batch_size))
     total = len(segments)
     batches = [segments[i:i + batch_size] for i in range(0, total, batch_size)]
+    checkpoint = TranslateCheckpoint(checkpoint_path, target.text_field)
     workers = min(max(1, int(settings.parallel_workers)), len(batches), 4)
     logger.info(f"Đang dịch {total} câu bằng Gemini "
                 f"({settings.gemini_translate_model}, mỗi lượt {batch_size} "
@@ -437,12 +449,17 @@ def translate_segments(segments: list[dict], target: TargetLang,
     next_start = [0.0]
 
     def _paced(batch: list[dict], ctx: list[dict]) -> list[dict]:
+        cached = checkpoint.take(batch)
+        if cached is not None:
+            return cached
         with pace_lock:
             wait = next_start[0] - time.monotonic()
             next_start[0] = max(next_start[0], time.monotonic()) + _BATCH_SLEEP
         if wait > 0:
             time.sleep(wait)
-        return _translate_resilient(batch, target, source_lang, settings, ctx)
+        merged = _translate_resilient(batch, target, source_lang, settings, ctx)
+        checkpoint.put(merged)
+        return merged
 
     done_count = 0
     pool = ThreadPoolExecutor(max_workers=workers)
@@ -467,4 +484,5 @@ def translate_segments(segments: list[dict], target: TargetLang,
     else:
         pool.shutdown(wait=True)
 
+    checkpoint.discard()
     return [seg for batch in results for seg in batch]

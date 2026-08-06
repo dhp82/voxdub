@@ -8,9 +8,11 @@ nơi cùng đúng.
 from __future__ import annotations
 
 import json
+import os
 import re
+import threading
 
-from autodub.utils import setup_logging
+from autodub.utils import save_json_atomic, setup_logging
 
 logger = setup_logging("autodub.translate")
 
@@ -32,9 +34,129 @@ class RateLimited(TranslateError):
     """
 
 
+class UsageCounter:
+    """Đếm request và token của một lượt dịch, an toàn đa luồng.
+
+    Người dùng trả tiền theo token nhưng không nhìn thấy con số đó ở đâu.
+    Mọi nơi dịch cộng vào đây mỗi lần đọc phản hồi; pipeline chốt sổ khi
+    render xong và ghi vào quality_report.json để người dùng biết video này
+    tốn bao nhiêu.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._requests = 0
+        self._prompt = 0
+        self._completion = 0
+
+    def reset(self) -> None:
+        with self._lock:
+            self._requests = self._prompt = self._completion = 0
+
+    def add(self, prompt_tokens: int, completion_tokens: int) -> None:
+        with self._lock:
+            self._requests += 1
+            self._prompt += max(0, int(prompt_tokens or 0))
+            self._completion += max(0, int(completion_tokens or 0))
+
+    def snapshot(self) -> dict:
+        with self._lock:
+            return {
+                "requests": self._requests,
+                "prompt_tokens": self._prompt,
+                "completion_tokens": self._completion,
+                "total_tokens": self._prompt + self._completion,
+            }
+
+
+# Sổ chung cho cả lượt dịch (phân tích, dịch, rà soát đều cộng vào đây).
+USAGE = UsageCounter()
+
+
 def contains_cjk(text: str) -> bool:
     """Chuỗi này còn sót chữ Hán hay không."""
     return bool(_CJK_RE.search(str(text or "")))
+
+
+class TranslateCheckpoint:
+    """Sổ lưu tạm bản dịch theo từng lô, để chạy lại không dịch lại từ đầu.
+
+    Dịch một video dài tốn hàng chục lượt gọi API. Hết hạn mức hay rớt mạng ở
+    lô thứ 40/50 mà vứt hết 39 lô đã xong là đốt tiền và thời gian. Mỗi lô
+    dịch xong được ghi ngay xuống đây (ghi nguyên tử); lượt chạy sau đọc lại
+    và bỏ qua các câu đã có. Dịch trọn vẹn thì xóa sổ — tệp kết quả cuối vẫn
+    do lớp gọi ghi, đúng giao kèo "chỉ lưu khi cả lượt thành công".
+
+    Khóa theo ``id`` câu và đối chiếu cả câu gốc, nên sổ cũ của một bản
+    nghe-chép khác (đã sửa tay, đã nghe lại...) không bị lấy nhầm.
+    """
+
+    def __init__(self, path: str | None, text_field: str) -> None:
+        self.path = path
+        self.text_field = text_field
+        self._lock = threading.Lock()
+        self._items: dict[str, dict] = {}
+        if not path or not os.path.exists(path):
+            return
+        try:
+            with open(path, encoding="utf-8") as f:
+                data = json.load(f)
+            if (isinstance(data, dict)
+                    and data.get("text_field") == text_field
+                    and isinstance(data.get("items"), dict)):
+                self._items = {
+                    k: v for k, v in data["items"].items()
+                    if isinstance(v, dict) and v.get("text")
+                }
+                if self._items:
+                    logger.info(f"Đọc sổ dịch tạm: {len(self._items)} câu "
+                                "đã dịch từ lượt trước")
+        except (ValueError, OSError) as e:
+            logger.warning(f"Sổ dịch tạm hỏng ({e}) — dịch lại từ đầu")
+            self._items = {}
+
+    @staticmethod
+    def _key(seg: dict) -> str:
+        return str(seg.get("id"))
+
+    def take(self, batch: list[dict]) -> list[dict] | None:
+        """Bản dịch đã lưu của cả lô, hoặc None nếu lô còn câu chưa dịch."""
+        merged: list[dict] = []
+        for seg in batch:
+            item = self._items.get(self._key(seg))
+            if item is None or item.get("src") != seg.get("text"):
+                return None
+            merged.append({**seg, self.text_field: item["text"]})
+        return merged
+
+    def put(self, merged_batch: list[dict]) -> None:
+        """Ghi một lô vừa dịch xong xuống đĩa (nguyên tử, an toàn đa luồng)."""
+        if not self.path:
+            return
+        with self._lock:
+            for seg in merged_batch:
+                self._items[self._key(seg)] = {
+                    "src": seg.get("text"),
+                    "text": seg.get(self.text_field, ""),
+                }
+            try:
+                save_json_atomic(
+                    {"text_field": self.text_field, "items": self._items},
+                    self.path)
+            except OSError as e:
+                # Không lưu được sổ tạm thì lượt dịch vẫn phải chạy tiếp.
+                logger.warning(f"Không ghi được sổ dịch tạm: {e}")
+
+    def discard(self) -> None:
+        """Xóa sổ khi cả lượt dịch đã thành công trọn vẹn."""
+        if not self.path:
+            return
+        try:
+            os.remove(self.path)
+        except FileNotFoundError:
+            pass
+        except OSError as e:
+            logger.warning(f"Không xóa được sổ dịch tạm: {e}")
 
 
 def strip_fences(text: str) -> str:

@@ -275,3 +275,123 @@ def _parse_ids(payload: str) -> list[dict]:
 def _json_segments(ids: list[int]) -> str:
     return json.dumps({"segments": [{"id": i, "text_vi": f"Câu {i}."}
                                     for i in ids]}, ensure_ascii=False)
+
+
+# ------------------------------------------------------ sổ dịch tạm ---- #
+
+def _ok_post(monkeypatch):
+    """requests.post luôn dịch đúng, đồng thời đếm số lần gọi."""
+    calls = []
+
+    def _post(url, json=None, headers=None, timeout=None):
+        ids = [s["id"] for s in _parse_ids(json["messages"][1]["content"])]
+        calls.append(ids)
+        return reply(_json_segments(ids))
+
+    import requests
+    monkeypatch.setattr(requests, "post", _post)
+    return calls
+
+
+def test_checkpoint_is_discarded_after_full_success(monkeypatch, tmp_path):
+    _ok_post(monkeypatch)
+    ckpt = str(tmp_path / "ckpt.json")
+    out = engine.translate_segments([seg(1), seg(2), seg(3)], TARGET, "zh-CN",
+                                    settings(), engine="openrouter",
+                                    checkpoint_path=ckpt)
+    assert len(out) == 3
+    import os
+    assert not os.path.exists(ckpt)   # dịch trọn vẹn thì sổ tự xóa
+
+
+def test_resume_skips_batches_already_in_checkpoint(monkeypatch, tmp_path):
+    # Lượt 1: lô thứ hai (id 3, 4) hỏng vì hết hạn mức — lô 1 đã kịp lưu sổ.
+    def _post_fail_second(url, json=None, headers=None, timeout=None):
+        ids = [s["id"] for s in _parse_ids(json["messages"][1]["content"])]
+        if 3 in ids:
+            return FakeResponse(429, {}, "quota")
+        return reply(_json_segments(ids))
+
+    import requests
+    monkeypatch.setattr(requests, "post", _post_fail_second)
+
+    ckpt = str(tmp_path / "ckpt.json")
+    segments = [seg(1), seg(2), seg(3), seg(4)]
+    with pytest.raises(RateLimited):
+        engine.translate_segments(segments, TARGET, "zh-CN",
+                                  settings(parallel_workers=1),
+                                  engine="openrouter", checkpoint_path=ckpt)
+    import os
+    assert os.path.exists(ckpt)       # phần đã dịch không bị vứt đi
+
+    # Lượt 2: chỉ lô còn thiếu mới gọi API.
+    calls = _ok_post(monkeypatch)
+    out = engine.translate_segments(segments, TARGET, "zh-CN",
+                                    settings(), engine="openrouter",
+                                    checkpoint_path=ckpt)
+    assert [s["id"] for s in out] == [1, 2, 3, 4]
+    assert all(s["text_vi"] for s in out)
+    assert calls == [[3, 4]]          # lô 1 lấy từ sổ, không dịch lại
+    assert not os.path.exists(ckpt)
+
+
+def test_checkpoint_ignores_entries_whose_source_changed(monkeypatch, tmp_path):
+    from autodub.text.translate_common import TranslateCheckpoint
+
+    ckpt = str(tmp_path / "ckpt.json")
+    cp = TranslateCheckpoint(ckpt, "text_vi")
+    cp.put([{**seg(1), "text_vi": "Bản cũ."}])
+
+    # Câu gốc đã bị sửa (nghe lại, sửa tay) — bản dịch cũ không dùng được.
+    changed = seg(1, text="新的原文")
+    assert TranslateCheckpoint(ckpt, "text_vi").take([changed]) is None
+    # Câu gốc giữ nguyên thì vẫn lấy được.
+    same = TranslateCheckpoint(ckpt, "text_vi").take([seg(1)])
+    assert same is not None and same[0]["text_vi"] == "Bản cũ."
+
+
+def test_corrupt_checkpoint_falls_back_to_full_translate(monkeypatch, tmp_path):
+    ckpt = tmp_path / "ckpt.json"
+    ckpt.write_text("{hỏng", encoding="utf-8")
+    calls = _ok_post(monkeypatch)
+    out = engine.translate_segments([seg(1), seg(2)], TARGET, "zh-CN",
+                                    settings(), engine="openrouter",
+                                    checkpoint_path=str(ckpt))
+    assert [s["id"] for s in out] == [1, 2]
+    assert calls                       # sổ hỏng thì dịch lại, không sập
+
+
+# --------------------------------------------------------- đếm token ---- #
+
+def test_usage_is_counted_from_the_response(monkeypatch):
+    from autodub.text.translate_common import USAGE
+
+    def _post(url, json=None, headers=None, timeout=None):
+        ids = [s["id"] for s in _parse_ids(json["messages"][1]["content"])]
+        resp = reply(_json_segments(ids))
+        resp._payload["usage"] = {"prompt_tokens": 100, "completion_tokens": 40}
+        return resp
+
+    import requests
+    monkeypatch.setattr(requests, "post", _post)
+
+    USAGE.reset()
+    engine.translate_segments([seg(1), seg(2), seg(3)], TARGET, "zh-CN",
+                              settings(), engine="openrouter")
+    snap = USAGE.snapshot()
+    assert snap["requests"] == 2              # 3 câu, mỗi lô 2 câu → 2 lượt
+    assert snap["prompt_tokens"] == 200
+    assert snap["completion_tokens"] == 80
+    assert snap["total_tokens"] == 280
+    USAGE.reset()
+
+
+def test_usage_missing_in_response_is_not_an_error(monkeypatch):
+    from autodub.text.translate_common import USAGE
+
+    _ok_post(monkeypatch)                      # reply() không có "usage"
+    USAGE.reset()
+    out = engine.translate_segments([seg(1)], TARGET, "zh-CN",
+                                    settings(), engine="openrouter")
+    assert out[0]["text_vi"]
+    assert USAGE.snapshot()["requests"] == 0
