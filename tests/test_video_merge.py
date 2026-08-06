@@ -34,7 +34,10 @@ def captured(monkeypatch):
         stderr = ""
 
     def fake_run(cmd, **kw):
-        calls.append(cmd)
+        # merge_video giờ gọi thêm ffprobe (tính trần timeout) — chỉ giữ
+        # lệnh ffmpeg vì các assert đều nhắm vào nó.
+        if cmd[0] == "ffmpeg":
+            calls.append(cmd)
         return Ok()
 
     monkeypatch.setattr(video_mod.subprocess, "run", fake_run)

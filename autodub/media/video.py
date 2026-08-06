@@ -3,9 +3,26 @@ import os
 import subprocess
 from functools import lru_cache
 
-from autodub.utils import setup_logging
+from autodub.utils import ffmpeg_timeout_s, setup_logging
 
 logger = setup_logging("autodub.video_merger")
+
+
+def probe_duration_s(video_path: str) -> float | None:
+    """Thời lượng (giây) của media qua ffprobe; None nếu không đọc được.
+
+    Dùng để tính trần timeout cho các lệnh encode dài — không phải giá trị
+    chính xác tuyệt đối nên lỗi thì cứ trả None, caller tự dùng trần rộng.
+    """
+    try:
+        result = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+             "-of", "default=noprint_wrappers=1:nokey=1", video_path],
+            capture_output=True, text=True, timeout=60,
+        )
+        return float(result.stdout.strip()) if result.returncode == 0 else None
+    except (OSError, subprocess.TimeoutExpired, ValueError):
+        return None
 
 
 @lru_cache(maxsize=1)
@@ -180,7 +197,18 @@ def merge_video(
     if filter_complex:
         logger.info("Re-encoding video (filters applied) — this takes a while")
 
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    # Trần timeout theo thời lượng thật: stream-copy thì 4x là quá rộng;
+    # re-encode CPU trên máy yếu có thể chậm hơn realtime nên nhân 8.
+    dur = probe_duration_s(video_path)
+    timeout = (max(900, int(dur * 8)) if filter_complex and dur
+               else ffmpeg_timeout_s(dur))
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True,
+                                timeout=timeout)
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(
+            f"FFmpeg treo quá {timeout}s khi ghép video — kiểm tra file "
+            f"nguồn có bị khóa hoặc driver GPU có ổn định không")
     if result.returncode != 0:
         raise RuntimeError(f"FFmpeg merge failed: {result.stderr}")
 

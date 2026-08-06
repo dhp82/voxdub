@@ -6,9 +6,13 @@ from concurrent.futures import ThreadPoolExecutor
 
 from pydub import AudioSegment
 
-from autodub.utils import setup_logging, ensure_dir, seg_wav_path
+from autodub.utils import setup_logging, ensure_dir, ffmpeg_timeout_s, seg_wav_path
 
 logger = setup_logging("autodub.audio")
+
+# Trần thời gian cho ffmpeg trên MỘT segment (vài giây audio) — 120 s là
+# rộng rãi gấp trăm lần bình thường; quá mức đó chắc chắn là treo.
+_SEG_TIMEOUT_S = 120
 
 # Parallel ffmpeg workers for per-segment filters. Threads (not processes):
 # the GIL is released while subprocess.run waits. Leave one core for the GUI
@@ -36,12 +40,18 @@ def apply_atempo(src: str, dst: str, speed: float) -> bool:
     left as the result and False is returned.
     """
     tmp = dst + ".atempo.tmp.wav"
-    result = subprocess.run(
-        ["ffmpeg", "-y", "-i", src, "-filter:a", f"atempo={speed:.3f}", tmp],
-        capture_output=True, text=True,
-    )
-    if result.returncode != 0 or not os.path.exists(tmp) or os.path.getsize(tmp) == 0:
-        logger.error(f"atempo {speed:.2f}x failed on {src}: {result.stderr[:200]}")
+    try:
+        result = subprocess.run(
+            ["ffmpeg", "-y", "-i", src, "-filter:a", f"atempo={speed:.3f}", tmp],
+            capture_output=True, text=True, timeout=_SEG_TIMEOUT_S,
+        )
+        failed = (result.returncode != 0 or not os.path.exists(tmp)
+                  or os.path.getsize(tmp) == 0)
+        err = result.stderr[:200] if failed else ""
+    except subprocess.TimeoutExpired:
+        failed, err = True, f"ffmpeg treo quá {_SEG_TIMEOUT_S}s"
+    if failed:
+        logger.error(f"atempo {speed:.2f}x failed on {src}: {err}")
         if os.path.exists(tmp):
             os.remove(tmp)
         if src != dst:
@@ -75,7 +85,11 @@ def extract_audio(video_path: str, output_path: str, sample_rate: int = 16000,
 
     logger.info(f"Extracting audio: {video_path} → {output_path}")
 
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True,
+                                timeout=ffmpeg_timeout_s(None))
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(f"FFmpeg treo khi tách audio từ {video_path}")
     if result.returncode != 0:
         raise RuntimeError(f"FFmpeg failed: {result.stderr}")
 
@@ -110,16 +124,21 @@ def slow_segments(
         if not os.path.exists(src):
             return
         dst = os.path.join(dst_dir, os.path.basename(src))
-        result = subprocess.run(
-            ["ffmpeg", "-y", "-i", src, "-filter:a", f"atempo={factor}", dst],
-            capture_output=True, text=True,
-        )
-        if (result.returncode != 0 or not os.path.exists(dst)
-                or os.path.getsize(dst) == 0):
+        try:
+            result = subprocess.run(
+                ["ffmpeg", "-y", "-i", src, "-filter:a", f"atempo={factor}", dst],
+                capture_output=True, text=True, timeout=_SEG_TIMEOUT_S,
+            )
+            failed = (result.returncode != 0 or not os.path.exists(dst)
+                      or os.path.getsize(dst) == 0)
+            err = result.stderr[:120] if failed else ""
+        except subprocess.TimeoutExpired:
+            failed, err = True, f"treo quá {_SEG_TIMEOUT_S}s"
+        if failed:
             # Giữ nguyên tốc độ gốc còn hơn mất hẳn clip: các bước sau coi
             # file thiếu là "segment missing" và video bị câm đoạn đó.
             logger.error(f"atempo lỗi trên {os.path.basename(src)} — "
-                         f"giữ tốc độ gốc ({result.stderr[:120]})")
+                         f"giữ tốc độ gốc ({err})")
             shutil.copyfile(src, dst)
 
     with ThreadPoolExecutor(max_workers=max_workers or _FFMPEG_WORKERS) as pool:
@@ -169,15 +188,20 @@ def postprocess_voice_clip(src: str, dst: str,
         f"afade=t=out:st={max(0.0, dur - fade_s):.3f}:d={fade_s}"
     )
     tmp = dst + ".post.tmp.wav"
-    result = subprocess.run(
-        ["ffmpeg", "-y", "-i", src, "-filter:a", filters,
-         "-ar", str(src_rate), "-acodec", "pcm_s16le", tmp],
-        capture_output=True, text=True,
-    )
-    if (result.returncode != 0 or not os.path.exists(tmp)
-            or os.path.getsize(tmp) == 0):
+    try:
+        result = subprocess.run(
+            ["ffmpeg", "-y", "-i", src, "-filter:a", filters,
+             "-ar", str(src_rate), "-acodec", "pcm_s16le", tmp],
+            capture_output=True, text=True, timeout=_SEG_TIMEOUT_S,
+        )
+        failed = (result.returncode != 0 or not os.path.exists(tmp)
+                  or os.path.getsize(tmp) == 0)
+        err = result.stderr[:120] if failed else ""
+    except subprocess.TimeoutExpired:
+        failed, err = True, f"treo quá {_SEG_TIMEOUT_S}s"
+    if failed:
         logger.warning(f"Hậu kỳ giọng lỗi trên {os.path.basename(src)} — "
-                       f"giữ clip thô ({result.stderr[:120]})")
+                       f"giữ clip thô ({err})")
         if os.path.exists(tmp):
             os.remove(tmp)
         if src != dst:
@@ -303,18 +327,24 @@ def merge_segments(
                    f"atrim=end={total_duration}"]
         if background_gain_db:
             filters.insert(0, f"volume={background_gain_db}dB")
-        result = subprocess.run(
-            ["ffmpeg", "-y", "-i", background_path,
-             "-filter:a", ",".join(filters),
-             "-acodec", "pcm_s16le", bg_tmp],
-            capture_output=True, text=True,
-        )
-        if result.returncode == 0 and os.path.getsize(bg_tmp) > 0:
+        try:
+            result = subprocess.run(
+                ["ffmpeg", "-y", "-i", background_path,
+                 "-filter:a", ",".join(filters),
+                 "-acodec", "pcm_s16le", bg_tmp],
+                capture_output=True, text=True,
+                timeout=ffmpeg_timeout_s(total_duration),
+            )
+            ok = result.returncode == 0 and os.path.getsize(bg_tmp) > 0
+            err = result.stderr[:200] if not ok else ""
+        except subprocess.TimeoutExpired:
+            ok, err = False, "ffmpeg treo khi chuẩn hóa nhạc nền"
+        if ok:
             bg_wave = wave.open(bg_tmp, "rb")
             ch = bg_wave.getnchannels()
         else:
             logger.warning(f"Background normalise failed, using silent base: "
-                           f"{result.stderr[:200]}")
+                           f"{err}")
     elif background_path:
         logger.warning(f"Background not found: {background_path}; using silent base")
 

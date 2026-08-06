@@ -20,7 +20,7 @@ import json
 import os
 import subprocess
 
-from autodub.utils import setup_logging
+from autodub.utils import ffmpeg_timeout_s, setup_logging
 
 logger = setup_logging("autodub.retime")
 
@@ -37,7 +37,7 @@ def probe_video_info(video_path: str) -> tuple[float, str]:
         ["ffprobe", "-v", "error", "-select_streams", "v:0",
          "-show_entries", "stream=avg_frame_rate:format=duration",
          "-of", "json", video_path],
-        capture_output=True, text=True,
+        capture_output=True, text=True, timeout=60,
     )
     if result.returncode != 0:
         raise RuntimeError(f"ffprobe failed on {video_path}: {result.stderr[:200]}")
@@ -54,7 +54,7 @@ def probe_duration(path: str) -> float | None:
     result = subprocess.run(
         ["ffprobe", "-v", "error", "-show_entries", "format=duration",
          "-of", "json", path],
-        capture_output=True, text=True,
+        capture_output=True, text=True, timeout=60,
     )
     if result.returncode != 0:
         return None
@@ -81,10 +81,19 @@ def slow_video(video_path: str, output_path: str, speed: float,
         "-pix_fmt", "yuv420p",
         "-y", output_path,
     ]
-    result = subprocess.run(cmd, capture_output=True, text=True)
-    if (result.returncode != 0 or not os.path.exists(output_path)
+    # Encode lại toàn bộ video — trần theo thời lượng nguồn, CPU yếu vẫn dư.
+    dur = probe_duration(video_path)
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True,
+                                timeout=max(900, int(dur * 8)) if dur
+                                else ffmpeg_timeout_s(None))
+        err = result.stderr[:200]
+        failed = result.returncode != 0
+    except subprocess.TimeoutExpired:
+        failed, err = True, "ffmpeg treo (quá trần thời gian)"
+    if (failed or not os.path.exists(output_path)
             or os.path.getsize(output_path) == 0):
-        logger.error(f"Slow video {speed}x failed: {result.stderr[:200]}")
+        logger.error(f"Slow video {speed}x failed: {err}")
         return False
     return True
 
@@ -92,15 +101,21 @@ def slow_video(video_path: str, output_path: str, speed: float,
 def slow_background(background_path: str, output_path: str,
                     speed: float) -> bool:
     """Slow the background track by the same factor (atempo accepts ≥0.5)."""
-    result = subprocess.run(
-        ["ffmpeg", "-v", "error", "-i", background_path,
-         "-filter:a", f"atempo={max(0.5, min(2.0, speed)):.6f}",
-         "-acodec", "pcm_s16le", "-y", output_path],
-        capture_output=True, text=True,
-    )
-    if (result.returncode != 0 or not os.path.exists(output_path)
+    try:
+        result = subprocess.run(
+            ["ffmpeg", "-v", "error", "-i", background_path,
+             "-filter:a", f"atempo={max(0.5, min(2.0, speed)):.6f}",
+             "-acodec", "pcm_s16le", "-y", output_path],
+            capture_output=True, text=True,
+            timeout=ffmpeg_timeout_s(probe_duration(background_path)),
+        )
+        err = result.stderr[:200]
+        failed = result.returncode != 0
+    except subprocess.TimeoutExpired:
+        failed, err = True, "ffmpeg treo (quá trần thời gian)"
+    if (failed or not os.path.exists(output_path)
             or os.path.getsize(output_path) == 0):
-        logger.error(f"Slow background {speed}x failed: {result.stderr[:200]}")
+        logger.error(f"Slow background {speed}x failed: {err}")
         return False
     return True
 

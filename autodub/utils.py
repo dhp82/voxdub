@@ -157,6 +157,20 @@ def seg_wav_path(seg_dir: str, seg_id: int) -> str:
     return new
 
 
+def ffmpeg_timeout_s(duration_s: float | None, floor: int = 300) -> int:
+    """Trần thời gian cho một lệnh ffmpeg xử lý ``duration_s`` giây media.
+
+    ffmpeg treo (codec lỗi, file bị khóa trên Windows, driver NVENC kẹt) mà
+    không có timeout thì pipeline đứng vĩnh viễn và không hủy được — mọi
+    ``subprocess.run`` gọi ffmpeg phải đặt ``timeout=``. Quy tắc: gấp 4 lần
+    thời lượng media (encode chậm nhất vẫn nhanh hơn nhiều), tối thiểu
+    ``floor`` giây; không biết thời lượng thì dùng trần rộng 1 giờ.
+    """
+    if not duration_s or duration_s <= 0:
+        return 3600
+    return max(floor, int(duration_s * 4))
+
+
 def format_timestamp(seconds: float) -> str:
     """SRT timestamp ``HH:MM:SS,mmm``.
 

@@ -76,7 +76,8 @@ def captured(monkeypatch, tmp_path):
 def test_slow_video_command(captured, tmp_path):
     out = str(tmp_path / "slow.mp4")
     assert slow_video("in.mp4", out, 0.82, "30000/1001", ["-c:v", "libx264"])
-    cmd = captured[0]
+    # captured còn chứa cả lệnh ffprobe (tính trần timeout) — lấy lệnh ffmpeg.
+    cmd = next(c for c in captured if c[0] == "ffmpeg")
     vf = cmd[cmd.index("-vf") + 1]
     assert "setpts=PTS/0.82" in vf
     assert "fps=30000/1001" in vf
@@ -87,7 +88,7 @@ def test_slow_video_command(captured, tmp_path):
 def test_slow_background_uses_atempo(captured, tmp_path):
     out = str(tmp_path / "bg.wav")
     assert slow_background("bg_in.wav", out, 0.82)
-    cmd = captured[0]
+    cmd = next(c for c in captured if c[0] == "ffmpeg")
     fa = cmd[cmd.index("-filter:a") + 1]
     assert fa.startswith("atempo=0.82")
 

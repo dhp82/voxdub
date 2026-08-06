@@ -225,46 +225,49 @@ def _extract_via_playwright(
     ]
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=headless, args=launch_args)
-        context = browser.new_context(
-            user_agent=_UA,
-            viewport={"width": 1920, "height": 1080},
-            locale="zh-CN",
-        )
-        # Hide webdriver flag — Douyin checks navigator.webdriver
-        context.add_init_script(
-            "Object.defineProperty(navigator, 'webdriver', {get: () => undefined});"
-        )
-        page = context.new_page()
+        # try/finally BẮT BUỘC: goto timeout hay lỗi giữa chừng mà không đóng
+        # browser thì mỗi lần batch fail rò rỉ một tiến trình Chromium headless.
+        try:
+            context = browser.new_context(
+                user_agent=_UA,
+                viewport={"width": 1920, "height": 1080},
+                locale="zh-CN",
+            )
+            # Hide webdriver flag — Douyin checks navigator.webdriver
+            context.add_init_script(
+                "Object.defineProperty(navigator, 'webdriver', {get: () => undefined});"
+            )
+            page = context.new_page()
 
-        captured = {"dash_video": [], "dash_audio": [], "progressive": []}
+            captured = {"dash_video": [], "dash_audio": [], "progressive": []}
 
-        def on_request(req):
-            u = req.url
-            if not _CDN_HOST_RE.search(u):
-                return
-            if _DASH_VIDEO_RE.search(u):
-                captured["dash_video"].append(u)
-            elif _DASH_AUDIO_RE.search(u):
-                captured["dash_audio"].append(u)
-            elif _VIDEO_MIME_RE.search(u):
-                captured["progressive"].append(u)
+            def on_request(req):
+                u = req.url
+                if not _CDN_HOST_RE.search(u):
+                    return
+                if _DASH_VIDEO_RE.search(u):
+                    captured["dash_video"].append(u)
+                elif _DASH_AUDIO_RE.search(u):
+                    captured["dash_audio"].append(u)
+                elif _VIDEO_MIME_RE.search(u):
+                    captured["progressive"].append(u)
 
-        page.on("request", on_request)
+            page.on("request", on_request)
 
-        logger.info(f"Loading Douyin page: {url}")
-        page.goto(url, wait_until="domcontentloaded", timeout=30000)
+            logger.info(f"Loading Douyin page: {url}")
+            page.goto(url, wait_until="domcontentloaded", timeout=30000)
 
-        deadline = time.time() + wait_seconds
-        while time.time() < deadline:
-            if captured["progressive"] or (captured["dash_video"] and captured["dash_audio"]):
-                break
-            page.wait_for_timeout(500)
+            deadline = time.time() + wait_seconds
+            while time.time() < deadline:
+                if captured["progressive"] or (captured["dash_video"] and captured["dash_audio"]):
+                    break
+                page.wait_for_timeout(500)
 
-        title = page.title() or ""
-        title = re.sub(r"\s*[-–]\s*抖音\s*$", "", title).strip()
-        canonical = page.url
-
-        browser.close()
+            title = page.title() or ""
+            title = re.sub(r"\s*[-–]\s*抖音\s*$", "", title).strip()
+            canonical = page.url
+        finally:
+            browser.close()
 
     logger.info(
         f"Captured: progressive={len(captured['progressive'])} "
@@ -329,7 +332,10 @@ def _ffmpeg_mux(video_path: Path, audio_path: Path, output_path: Path) -> None:
         "-c", "copy",
         str(output_path),
     ]
-    proc = subprocess.run(cmd, capture_output=True, text=True)
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+    except subprocess.TimeoutExpired:
+        raise RuntimeError("ffmpeg mux treo quá 600s")
     if proc.returncode != 0:
         raise RuntimeError(f"ffmpeg mux failed: {proc.stderr[-500:]}")
 
@@ -343,7 +349,7 @@ def _ffprobe_duration(path: Path) -> float:
                 "-of", "default=nokey=1:noprint_wrappers=1",
                 str(path),
             ],
-            text=True,
+            text=True, timeout=60,
         )
         return float(out.strip())
     except Exception as e:
