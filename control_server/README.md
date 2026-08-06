@@ -49,6 +49,9 @@ Ví dụ vào `C:\voxdub\control_server\` (qua RDP kéo-thả hoặc share clipb
 
 ### Bước 2 — Tạo file khởi động `start_server.cmd` trên VPS
 
+Có sẵn mẫu `start_server.example.cmd` — chép thành `start_server.cmd`
+(tên này đã gitignore) rồi dán token mới vào:
+
 ```bat
 @echo off
 REM Token do ban tu sinh — KHONG dung lai token cu, KHONG commit file nay
@@ -74,7 +77,11 @@ Cách đơn giản nhất trên Windows: Task Scheduler.
 
 ### Bước 4 — Nối nginx vào backend
 
-Trong server block 443, thay `location /` placeholder bằng:
+**Cách khuyến nghị**: dùng file cấu hình đầy đủ `nginx-voxdub.conf` kèm sẵn
+trong thư mục này (có ACME passthrough, HSTS, timeout, 502 JSON fallback).
+Hướng dẫn cài nằm ngay trong phần comment đầu file đó.
+
+Hoặc sửa tay tối thiểu: trong server block 443, thay `location /` placeholder bằng:
 
 ```nginx
 location / {

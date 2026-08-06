@@ -45,4 +45,6 @@ smoke_test_result.json
 # Control server runtime state (VPS-side)
 control_server/state.json
 control_server/access.log
+control_server/access.log.1
 control_server/config.cmd
+control_server/start_server.cmd
