@@ -54,12 +54,25 @@ class VoiceAndExportMixin:
         segment = self._segment(seg_id)
         return str(segment.get(self._state.target.text_field, "")) if segment else ""
 
+    # -- Khóa chéo ------------------------------------------------------
+    def _busy_warn(self) -> bool:
+        """True nếu đang đọc lại giọng hoặc đang xuất — hai việc này đụng
+        cùng các tệp (dubbed_video.mp4, các đoạn giọng) nên cấm chạy chéo."""
+        if (self._resynth_worker is not None
+                and self._resynth_worker.isRunning()):
+            TOASTS.warn("Đang đọc lại giọng, hãy đợi xong đã.")
+            return True
+        if (self._rebuild_worker is not None
+                and self._rebuild_worker.isRunning()):
+            TOASTS.warn("Đang xuất video, hãy đợi xong đã.")
+            return True
+        return False
+
     def _start_resynth(self, edits: dict[int, str],
                        resynth_all: bool = False) -> None:
         from autodub_gui.workers import SaveAllWorker
 
-        if self._resynth_worker is not None and self._resynth_worker.isRunning():
-            TOASTS.warn("Đang đọc lại giọng, hãy đợi xong đã.")
+        if self._busy_warn():
             return
         values = self.voice_panel.values()
         settings = replace(self._settings_provider(),
@@ -182,8 +195,7 @@ class VoiceAndExportMixin:
     def _export(self) -> None:
         from autodub_gui.workers import RebuildWorker
 
-        if self._rebuild_worker is not None and self._rebuild_worker.isRunning():
-            TOASTS.warn("Đang xuất video, hãy đợi xong đã.")
+        if self._busy_warn():
             return
         if not self._work_dir:
             return
@@ -246,8 +258,7 @@ class VoiceAndExportMixin:
         """
         from autodub_gui.workers import SubtitleWorker
 
-        if self._rebuild_worker is not None and self._rebuild_worker.isRunning():
-            TOASTS.warn("Đang xuất video, hãy đợi xong đã.")
+        if self._busy_warn():
             return
         if not self._work_dir:
             return
