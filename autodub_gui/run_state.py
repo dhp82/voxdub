@@ -125,6 +125,12 @@ class RunRegistry(QObject):
     # -- Việc đang chạy ------------------------------------------------
     def start_job(self, job: ActiveJob, on_cancel=None) -> None:
         """Ghi nhận một việc vừa bắt đầu, kèm hàm dừng để Trang chủ gọi lại."""
+        if self._job is not None:
+            # Không được đè việc đang chạy — mất luôn nút Dừng của nó.
+            # Các trang phải kiểm tra is_busy() trước; đây là lưới an toàn.
+            self.add_activity(
+                LEVEL_WARNING,
+                f"Bắt đầu «{job.title}» khi «{self._job.title}» chưa xong")
         job.started_at = job.started_at or time.time()
         job.step_started_at = time.monotonic()
         job.done_steps = set()

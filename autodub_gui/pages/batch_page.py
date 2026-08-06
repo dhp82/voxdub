@@ -547,6 +547,11 @@ class BatchPage(BasePage):
         if self.is_running():
             TOASTS.warn("Đang có video chạy dở. Hãy đợi xong hoặc bấm Dừng.")
             return
+        if REGISTRY.is_busy():
+            job = REGISTRY.current()
+            TOASTS.warn(f"Đang chạy «{job.title}» ở trang khác. "
+                        "Hãy đợi xong hoặc dừng việc đó trước.")
+            return
         self._pending_adds -= {it.key for it in items}
         self.log.clear()
         for item in items:

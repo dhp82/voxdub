@@ -524,6 +524,10 @@ class SettingsPage(BasePage):
             return
         for item in spec.FIELDS:
             self._set_value(item, self._snapshot.get(item.key, item.default))
+        # Thẻ Giọng đọc không nằm trong spec.FIELDS — trả nó về ảnh chụp
+        # đã lưu, không thì giọng vừa bấm chọn vẫn dính lại sau khi Hủy.
+        if hasattr(self, "voice_panel"):
+            self.voice_panel.load(self._snapshot)
         self._set_dirty(False)
         TOASTS.info("Đã quay về giá trị đã lưu lần trước.")
 

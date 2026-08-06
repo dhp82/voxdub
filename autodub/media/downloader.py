@@ -57,6 +57,10 @@ def download_video(url: str, output_dir: str) -> str:
         "merge_output_format": "mp4",
         "quiet": False,
         "no_warnings": False,
+        # Mạng chập chờn: tự thử lại thay vì fail cả video trong batch.
+        "retries": 5,
+        "fragment_retries": 5,
+        "socket_timeout": 30,
     }
 
     logger.info(f"Downloading video from: {canonical}")
@@ -95,6 +99,9 @@ def build_ydl_opts(
         "quiet": False,
         "no_warnings": False,
         "noprogress": False,
+        "retries": 5,
+        "fragment_retries": 5,
+        "socket_timeout": 30,
     }
     if cookies_from_browser:
         opts["cookiesfrombrowser"] = (cookies_from_browser,)

@@ -501,6 +501,11 @@ class NewProjectPage(BasePage):
         if self._worker is not None and self._worker.isRunning():
             TOASTS.warn("Đang có một video chạy dở. Hãy đợi xong hoặc bấm Dừng.")
             return
+        if REGISTRY.is_busy():
+            job = REGISTRY.current()
+            TOASTS.warn(f"Đang chạy «{job.title}» ở trang khác. "
+                        "Hãy đợi xong hoặc dừng việc đó trước.")
+            return
         self.pending_banner.setVisible(False)
         self.done_banner.setVisible(False)
         self.steps.reset()
