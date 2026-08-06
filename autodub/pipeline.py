@@ -273,14 +273,27 @@ class DubPipeline:
         # --- Step 3: Speech-to-Text (ASR) — GPU-exclusive ---
         rep.check_cancelled()
         logger.info("=" * 60)
+        segments = None
         if os.path.exists(transcript_orig_path):
-            logger.info(f"STEP 3: Reusing existing transcript: {transcript_orig_path}")
-            with open(transcript_orig_path, encoding="utf-8") as f:
-                segments = json.load(f)
-            logger.info(f"Dùng lại lời thoại đã nghe từ lần chạy trước "
-                        f"({len(segments)} câu) — đỡ chờ")
-            rep.emit("asr", "skip", detail=f"{len(segments)} segments (cached)")
-        else:
+            # Validate khi resume: file hỏng (crash giữa chừng ở bản cũ,
+            # disk full...) thì nghe lại thay vì sập cả pipeline.
+            try:
+                with open(transcript_orig_path, encoding="utf-8") as f:
+                    cached_segments = json.load(f)
+                if not (isinstance(cached_segments, list)
+                        and all(isinstance(s, dict) and "start" in s
+                                and "end" in s and "text" in s
+                                for s in cached_segments)):
+                    raise ValueError("transcript thiếu trường bắt buộc")
+                segments = cached_segments
+                logger.info(f"STEP 3: Reusing existing transcript: {transcript_orig_path}")
+                logger.info(f"Dùng lại lời thoại đã nghe từ lần chạy trước "
+                            f"({len(segments)} câu) — đỡ chờ")
+                rep.emit("asr", "skip", detail=f"{len(segments)} segments (cached)")
+            except (ValueError, json.JSONDecodeError, OSError) as e:
+                logger.warning(f"Transcript cũ hỏng ({e}) — nghe lại từ đầu")
+                segments = None
+        if segments is None:
             # Demucs và ASR chỉ được chạy song song khi KHÔNG giành nhau
             # tài nguyên: Demucs trong tiến trình con GPU còn ASR chắc chắn
             # chạy CPU (Paraformer, hoặc Whisper không nạp được CUDA).

@@ -4,7 +4,7 @@ import os
 
 from autodub.config import Settings
 from autodub.languages import WHISPER_LANG_MAP
-from autodub.utils import gpu_venv_dir, setup_logging
+from autodub.utils import gpu_venv_dir, save_json_atomic, setup_logging
 
 logger = setup_logging("autodub.transcriber")
 
@@ -301,7 +301,7 @@ def split_long_segments(segments: list[dict], max_duration: float = 10.0) -> lis
 
 
 def save_transcript(segments: list[dict], output_path: str) -> str:
-    with open(output_path, "w", encoding="utf-8") as f:
-        json.dump(segments, f, ensure_ascii=False, indent=2)
+    # Atomic: crash giữa chừng không được phá transcript cũ (đắt để tạo lại).
+    save_json_atomic(segments, output_path)
     logger.info(f"Transcript saved: {output_path}")
     return output_path
