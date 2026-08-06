@@ -1,0 +1,40 @@
+# systemd unit — chạy control server bền vững trên VPS Linux.
+#
+# Cài đặt (1 lần, chạy bằng root trên VPS):
+#   1. Copy thư mục control_server lên VPS, ví dụ: /opt/autodub-control/
+#   2. Tạo file token:  echo "ADMIN_TOKEN=$(openssl rand -hex 24)" > /opt/autodub-control/.env
+#      chmod 600 /opt/autodub-control/.env
+#   3. cp autodub-control.service /etc/systemd/system/
+#   4. systemctl daemon-reload
+#   5. systemctl enable --now autodub-control
+#
+# Xem log:   journalctl -u autodub-control -f
+# Restart:   systemctl restart autodub-control
+
+[Unit]
+Description=AutoDub remote control server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/autodub-control
+ExecStart=/usr/bin/node /opt/autodub-control/server.js
+# Token nằm trong file riêng (mode 600) — unit file thì world-readable.
+# Tạo trên VPS:  echo "ADMIN_TOKEN=$(openssl rand -hex 24)" > /opt/autodub-control/.env
+#                chmod 600 /opt/autodub-control/.env
+EnvironmentFile=/opt/autodub-control/.env
+# Nghe loopback — TLS do nginx/Caddy phía trước lo (xem README.md)
+Environment=PORT=3001
+Environment=HOST=127.0.0.1
+Environment=TRUST_PROXY=1
+Restart=always
+RestartSec=3
+# Hardening cơ bản
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/opt/autodub-control
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

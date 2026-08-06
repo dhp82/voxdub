@@ -1,0 +1,48 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+
+# Virtualenvs
+.venv/
+.venv-gpu/
+.venv-asr/
+.venv-vieneu/
+venv/
+
+# Config with personal keys — copy .env.example to .env and fill in
+.env
+
+# Pipeline artifacts
+output/
+downloads/
+batch_state.json
+logs/
+
+# Du lieu ca nhan — danh sach URL Douyin dang xu ly
+linkdouyin.txt
+
+# Models (nhieu GB; tai ve bang cac script trong scripts/)
+models/
+
+# Giong mau nguoi dung tu them (tep .wav nang)
+voices/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Build exe
+*.spec.bak
+pw-browsers/
+smoke_test_result.json
+
+# Control server runtime state (VPS-side)
+control_server/state.json
+control_server/access.log
+control_server/config.cmd
