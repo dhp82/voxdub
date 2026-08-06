@@ -500,10 +500,12 @@ class MainWindow(QMainWindow):
         for page in self._built_pages():
             if hasattr(page, "cleanup"):
                 page.cleanup()
-        # Chờ luồng kiểm tra khóa từ xa xong — hủy QThread đang chạy lúc
-        # teardown sẽ làm Qt crash cứng (exit code 0xC0000409).
-        if self._gate_watcher is not None and self._gate_watcher.isRunning():
-            self._gate_watcher.wait(5000)
+        # Chờ mọi QThread phụ xong — hủy QThread đang chạy lúc teardown
+        # sẽ làm Qt crash cứng (exit code 0xC0000409).
+        for worker in (self._gate_watcher, self._status_worker,
+                       self._preflight_worker, self._update_worker):
+            if worker is not None and worker.isRunning():
+                worker.wait(5000)
         event.accept()
 
 

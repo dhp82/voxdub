@@ -252,6 +252,8 @@ class VoiceLibraryTab(QWidget):
 
     def cleanup(self) -> None:
         self._preview.cleanup()
+        # Khối quản lý giọng có thể đang chạy luồng học giọng nền.
+        self._panel.cleanup()
 
     # -- Dữ liệu ---------------------------------------------------------
     def _reload_voices(self) -> None:

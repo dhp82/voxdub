@@ -305,6 +305,11 @@ class VoiceSettingsPanel(CollapsibleSection):
         self._thread = worker
         worker.start()
 
+    def cleanup(self) -> None:
+        """Chờ luồng học giọng xong — hủy QThread đang chạy làm Qt crash cứng."""
+        if self._thread is not None and self._thread.isRunning():
+            self._thread.wait(10_000)
+
 
 class ConnectionChecks(CollapsibleSection):
     """Thử gọi thật tới nơi dịch đang chọn, và tới Gemini."""
@@ -369,6 +374,12 @@ class ConnectionChecks(CollapsibleSection):
         checker.finished.connect(_done)
         self._threads[key] = checker
         checker.start()
+
+    def cleanup(self) -> None:
+        """Chờ các luồng kiểm tra kết nối xong trước khi teardown."""
+        for checker in list(self._threads.values()):
+            if checker.isRunning():
+                checker.wait(10_000)
 
     def _settings_from_form(self):
         """Bản cấu hình phản ánh đúng những gì đang gõ trên màn hình.
@@ -697,6 +708,11 @@ class DiskUsagePanel(CollapsibleSection):
         worker.finished.connect(_done)
         self._thread = worker
         worker.start()
+
+    def cleanup(self) -> None:
+        """Chờ luồng đo/dọn đĩa xong trước khi teardown."""
+        if self._thread is not None and self._thread.isRunning():
+            self._thread.wait(10_000)
 
 
 def _last_json_line(output: str) -> dict:

@@ -617,8 +617,10 @@ class SettingsPage(BasePage):
 
     # -- Vòng đời ------------------------------------------------------
     def cleanup(self) -> None:
-        if hasattr(self, "voice_panel"):
-            self.voice_panel.cleanup()
+        for name in ("voice_panel", "checks_panel", "disk_panel"):
+            panel = getattr(self, name, None)
+            if panel is not None and hasattr(panel, "cleanup"):
+                panel.cleanup()
 
 
 
