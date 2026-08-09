@@ -22,8 +22,8 @@ from autodub_gui.ui.inputs import (
 from autodub_gui.ui.labels import ElidedLabel
 from autodub_gui.ui.style import clear_background
 
-STEP_NAMES = ("Video", "Nhận dạng", "Dịch thuật", "Giọng đọc",
-              "Phụ đề", "Xuất video")
+STEP_NAMES = ("Video", "Nhận dạng", "Dịch thuật", "Giọng & Phụ đề",
+              "Chạy dịch", "Xuất video")
 
 VIDEO_FILTER = ("Video (*.mp4 *.mkv *.mov *.avi *.webm);;Tất cả tệp (*.*)")
 _LARGE_FILE_BYTES = 4 * 1024 ** 3
@@ -158,6 +158,17 @@ class VideoStep(_StepPanel):
         self._on_source("file")
         self.file_edit.set_text(path)
 
+    def set_resume(self, work_dir: str) -> None:
+        """Chuyển bước 1 sang «Tiếp tục dang dở» trỏ vào một dự án có sẵn.
+
+        Trang cha gọi khi một lượt chạy dừng giữa chừng (lỗi, hết Vox, chờ
+        dịch tay) — bấm chạy lại sẽ đi tiếp đúng dự án cũ thay vì tạo dự án
+        mới và bị trừ Vox lần nữa.
+        """
+        self.source.set_key("resume")
+        self._on_source("resume")
+        self.resume_edit.set_text(work_dir)
+
     def values(self) -> dict:
         return {
             "source": self.source.current_key(),
@@ -189,12 +200,14 @@ class VideoStep(_StepPanel):
 
 
 class RecognizeStep(_StepPanel):
-    """Bước 2: nghe và chép lời video gốc."""
+    """Bước 2: nghe và chép lời video gốc, kèm cách xử lý nhạc nền."""
 
     def __init__(self, parent: QWidget | None = None):
         super().__init__("Nghe và chép lời",
                          "Ứng dụng nghe video gốc rồi chép lại thành chữ. "
                          "Chép càng đúng thì bản dịch càng sát.", parent)
+        from autodub_gui.ui.collapsible import CollapsibleSection
+
         self.engine = LabeledCombo(
             "Bộ nhận dạng", consts.ASR_ENGINES,
             "Whisper nghe được mọi ngôn ngữ. Paraformer chính xác hơn với "
@@ -217,10 +230,32 @@ class RecognizeStep(_StepPanel):
         self.body.addWidget(self.model)
         self.body.addWidget(self.language)
         self.body.addWidget(self.auto_detect)
+
+        # Nhạc nền — dọn về đây từ bước Xuất video cũ, vì tách giọng chạy
+        # ngay sau bước nghe; gập lại mặc định cho gọn.
+        self._bg_section = CollapsibleSection("Nhạc nền")
+        self.background = LabeledCombo(
+            "Cách giữ nhạc nền", consts.BG_MODES,
+            "Tách giọng gốc giữ được nhạc nền hay nhất nhưng chạy lâu hơn.")
+        self.background.changed.connect(self._on_background)
+        self.duck = LabeledSlider(
+            "Mức giảm tiếng gốc", -40.0, 0.0, 1.0,
+            "Càng âm thì tiếng gốc càng nhỏ khi có lời thoại tiếng Việt.",
+            " dB", decimals=0)
+        self.duck.set_value(-12.0)
+        self.duck.changed.connect(lambda _v: self.changed.emit())
+        self._bg_section.add_widget(self.background)
+        self._bg_section.add_widget(self.duck)
+        self.body.addWidget(self._bg_section)
         self.finish()
+        self._on_background()
 
     def _on_auto(self, checked: bool) -> None:
         self.language.setEnabled(not checked)
+        self.changed.emit()
+
+    def _on_background(self) -> None:
+        self.duck.setEnabled(self.background.current_key() == "duck")
         self.changed.emit()
 
     def values(self) -> dict:
@@ -229,6 +264,8 @@ class RecognizeStep(_StepPanel):
             "whisper_model": self.model.current_key(),
             "source_lang": self.language.current_key(),
             "auto_detect": self.auto_detect.isChecked(),
+            "bg_mode": self.background.current_key(),
+            "bg_duck_db": self.duck.value(),
         }
 
     def load(self, data: dict) -> None:
@@ -236,6 +273,9 @@ class RecognizeStep(_StepPanel):
         self.model.set_key(data.get("whisper_model", "auto"))
         self.language.set_key(data.get("source_lang", "zh-CN"))
         self.auto_detect.setChecked(bool(data.get("auto_detect", False)))
+        self.background.set_key(data.get("bg_mode", "demucs"))
+        self.duck.set_value(float(data.get("bg_duck_db", -12.0)))
+        self._on_background()
 
 
 class TranslateStep(_StepPanel):
@@ -243,8 +283,8 @@ class TranslateStep(_StepPanel):
 
     def __init__(self, parent: QWidget | None = None):
         super().__init__("Dịch sang tiếng Việt",
-                         "Chọn giọng văn cho bản dịch. Ngôn ngữ đích luôn là "
-                         "tiếng Việt.", parent)
+                         "Chọn cách dịch và giọng văn cho bản dịch. Ngôn ngữ "
+                         "đích luôn là tiếng Việt.", parent)
         self.source_view = QLabel("")
         self.source_view.setStyleSheet(
             f"color: {tokens.TEXT_SECONDARY}; font-size: {tokens.FS_BODY}px; "
@@ -262,52 +302,112 @@ class TranslateStep(_StepPanel):
         self.body.addWidget(LabeledWidget(
             "Dịch sang", target, "Bản này chỉ lồng tiếng Việt."))
 
+        # Hai lựa chọn quyết định giá của video — lưu lại vào Cài đặt khi
+        # bấm chạy để các video sau dùng luôn, khỏi chọn lại.
+        self.auto_translate = QCheckBox("Dịch tự động qua máy chủ VoxDub")
+        self.auto_translate.setToolTip(
+            "Bật: máy chủ dịch toàn bộ, 12 Vox mỗi câu thoại. Tắt: ứng dụng "
+            "dừng ở bước dịch và hướng dẫn bạn dịch tay, còn 10 Vox mỗi câu.")
+        self.auto_translate.setChecked(True)
+        self.auto_translate.toggled.connect(self._on_auto_translate)
+        self.body.addWidget(self.auto_translate)
+
+        self.metadata = QCheckBox("Tạo tiêu đề + mô tả đăng bài (+20 Vox)")
+        self.metadata.setToolTip(
+            "Máy chủ viết sẵn tiêu đề, mô tả và thẻ cho mạng xã hội, lưu vào "
+            "tệp youtube_post.txt trong thư mục dự án. Tắt đi nếu bạn tự viết.")
+        self.metadata.setChecked(True)
+        self.metadata.toggled.connect(lambda _c: self.changed.emit())
+        self.body.addWidget(self.metadata)
+
         self.style = LabeledCombo(
             "Phong cách dịch",
             [(label, key) for label, key, _note in consts.TRANSLATE_STYLES],
             "Quyết định giọng văn của bản dịch, ví dụ trang trọng hay đời thường.")
-        self.engine = LabeledCombo(
-            "Dịch bằng", consts.TRANSLATE_ENGINES,
-            "Để nguyên Theo cài đặt chung nếu bạn không có nhu cầu đặc biệt.")
+        self.engine_row = LabeledWidget(
+            "Dịch bằng", self._engine_view(),
+            "Máy chủ VoxDub tự chọn mô hình tốt nhất — bạn không phải cấu "
+            "hình gì.")
         self.note = LabeledLineEdit(
             "Ghi chú thêm cho người dịch",
             "ví dụ: giữ tên nhân vật Hán Việt, xưng hô mình với các bạn",
             "Ghi chú này được gửi kèm mỗi lần dịch.")
-        for widget in (self.style, self.engine):
-            widget.changed.connect(self.changed.emit)
+        self.style.changed.connect(self.changed.emit)
         self.note.changed.connect(lambda _t: self.changed.emit())
         self.body.addWidget(self.style)
-        self.body.addWidget(self.engine)
+        self.body.addWidget(self.engine_row)
         self.body.addWidget(self.note)
+
+        self.manual_note = QLabel(
+            "Đã tắt dịch tự động: chạy tới bước dịch, ứng dụng sẽ dừng lại và "
+            "mở hướng dẫn để bạn tự dịch (theo TRANSLATE_PENDING.txt), xong "
+            "bấm tiếp tục. Giá video vẫn tính theo số câu thoại.")
+        self.manual_note.setWordWrap(True)
+        self.manual_note.setStyleSheet(
+            f"color: {tokens.TEXT_MUTED}; font-size: {tokens.FS_META}px; "
+            f"background: transparent;")
+        self.manual_note.setVisible(False)
+        self.body.addWidget(self.manual_note)
         self.finish()
+
+    @staticmethod
+    def _engine_view() -> QLabel:
+        view = QLabel("VoxDub Cloud")
+        view.setStyleSheet(
+            f"color: {tokens.TEXT_PRIMARY}; font-size: {tokens.FS_BODY}px; "
+            f"font-weight: 600; background: {tokens.BG_INPUT}; "
+            f"border-radius: 8px; padding: 8px 12px;")
+        return view
+
+    def _on_auto_translate(self, checked: bool) -> None:
+        # Tắt dịch tự động thì phong cách và ghi chú không được gửi đi đâu
+        # cả — mờ chúng đi cho khỏi gây hiểu lầm.
+        for widget in (self.style, self.engine_row, self.note):
+            widget.setEnabled(checked)
+        self.manual_note.setVisible(not checked)
+        self.changed.emit()
 
     def set_source_language(self, label: str) -> None:
         self.source_view.setText(label)
 
     def values(self) -> dict:
         return {
+            "auto_translate": self.auto_translate.isChecked(),
+            "generate_metadata": self.metadata.isChecked(),
             "translate_style": self.style.current_key(),
-            "translate_engine": self.engine.current_key(),
             "translate_note": self.note.text(),
         }
 
     def load(self, data: dict) -> None:
+        # Nháp chưa có hai mục mới thì rơi về giá trị trong Cài đặt — hai
+        # nơi luôn thống nhất, giống cách VoiceStep xử lý phụ đề.
+        try:
+            from autodub.config import Settings
+            settings = Settings.load()
+            fb_auto = settings.translate_enabled
+            fb_meta = settings.generate_metadata
+        except Exception:  # noqa: BLE001 — cấu hình hỏng thì dùng mặc định
+            fb_auto, fb_meta = True, True
+        self.auto_translate.setChecked(bool(data.get("auto_translate", fb_auto)))
+        self.metadata.setChecked(bool(data.get("generate_metadata", fb_meta)))
         self.style.set_key(data.get("translate_style", "natural"))
-        self.engine.set_key(data.get("translate_engine", ""))
         self.note.set_text(data.get("translate_note", ""))
+        self._on_auto_translate(self.auto_translate.isChecked())
 
 
 class VoiceStep(_StepPanel):
-    """Bước 4: dùng giọng mặc định; muốn giọng khác thì mở phần đổi giọng."""
+    """Bước 4: giọng đọc + phụ đề — hai lựa chọn cuối trước khi chạy."""
 
     preview_requested = Signal(str)     # tên giọng
+    style_requested = Signal()
 
     def __init__(self, parent: QWidget | None = None):
-        super().__init__("Giọng đọc tiếng Việt",
+        super().__init__("Giọng đọc & phụ đề",
                          "Video này sẽ đọc bằng giọng mặc định bạn chọn trong "
-                         "Cài đặt. Chỉ mở phần đổi giọng khi muốn riêng video "
-                         "này dùng giọng khác.",
+                         "Cài đặt. Chọn thêm cách hiện phụ đề — sau khi chạy "
+                         "xong vẫn sửa được trong Trình chỉnh sửa.",
                          parent)
+        from autodub.media.subtitle import PRESET_CHOICES
         from autodub_gui.ui.collapsible import CollapsibleSection
         from autodub_gui.voice_picker import VoicePicker
 
@@ -341,6 +441,43 @@ class VoiceStep(_StepPanel):
         self.speed.set_value(1.0)
         self.speed.changed.connect(lambda _v: self.changed.emit())
         self.body.addWidget(self.speed)
+
+        # Phụ đề — dọn về đây từ bước Phụ đề cũ (bước 5 giờ là Chạy dịch).
+        self.mode = LabeledCombo(
+            "Kiểu phụ đề", consts.SUBTITLE_MODES,
+            "Phụ đề rời là tệp riêng, người xem tự bật tắt. Ghi thẳng vào "
+            "hình thì chữ nằm luôn trên video.")
+        self.mode.changed.connect(self.changed.emit)
+        self.body.addWidget(self.mode)
+
+        self.preset = LabeledCombo(
+            "Bộ kiểu chữ", PRESET_CHOICES,
+            "Chọn một bộ có sẵn là xong. Muốn tự quyết từng thông số thì bấm "
+            "Kiểu chữ và vùng che.")
+        self.preset.changed.connect(self.changed.emit)
+        self.body.addWidget(self.preset)
+
+        row = QHBoxLayout()
+        row.setSpacing(tokens.SP_2)
+        self.btn_style = GhostButton("Kiểu chữ và vùng che…")
+        self.btn_style.clicked.connect(self.style_requested.emit)
+        row.addWidget(self.btn_style)
+        row.addStretch()
+        self.body.addLayout(row)
+
+        self.summary = QLabel("Kiểu mặc định, chưa che vùng nào")
+        self.summary.setWordWrap(True)
+        self.summary.setStyleSheet(
+            f"color: {tokens.TEXT_MUTED}; font-size: {tokens.FS_META}px; "
+            f"background: transparent;")
+        self.body.addWidget(self.summary)
+
+        self.audio_only = QCheckBox("Chỉ xuất âm thanh và phụ đề, bỏ ghép video")
+        self.audio_only.setToolTip(
+            "Bật khi bạn tự dựng video ở phần mềm khác và chỉ cần tiếng Việt "
+            "cùng tệp phụ đề.")
+        self.audio_only.toggled.connect(lambda _c: self.changed.emit())
+        self.body.addWidget(self.audio_only)
 
         self.status = QLabel("")
         self.status.setWordWrap(True)
@@ -376,6 +513,9 @@ class VoiceStep(_StepPanel):
     def set_status(self, text: str) -> None:
         self.status.setText(text)
 
+    def set_summary(self, text: str) -> None:
+        self.summary.setText(text)
+
     def values(self) -> dict:
         # Không mở phần đổi giọng thì trả về rỗng — pipeline sẽ tự dùng
         # giọng mặc định trong Cài đặt.
@@ -383,6 +523,9 @@ class VoiceStep(_StepPanel):
             "voice": (self.picker.voice()
                       if self._override.is_expanded() else ""),
             "voice_speed": self.speed.value(),
+            "subtitle_mode": self.mode.current_key(),
+            "subtitle_preset": self.preset.current_key(),
+            "skip_video": self.audio_only.isChecked(),
         }
 
     def load(self, data: dict) -> None:
@@ -392,89 +535,29 @@ class VoiceStep(_StepPanel):
             self.picker.set_voice(voice)
         self._override.set_expanded(bool(voice))
         self.speed.set_value(float(data.get("voice_speed", 1.0)))
+        # Nháp không có mục nào thì rơi về giá trị trong Cài đặt, không
+        # phải "none"/"clean" cứng — để hai nơi luôn thống nhất.
+        try:
+            from autodub.config import Settings
+            settings = Settings.load()
+            fb_mode = settings.subtitle_mode
+            fb_preset = settings.subtitle_preset
+        except Exception:  # noqa: BLE001 — cấu hình hỏng thì dùng mặc định
+            fb_mode, fb_preset = "none", "clean"
+        self.mode.set_key(data.get("subtitle_mode", fb_mode))
+        self.preset.set_key(data.get("subtitle_preset", fb_preset))
+        self.audio_only.setChecked(bool(data.get("skip_video", False)))
         self._refresh_default_label()
 
 
-class SubtitleStep(_StepPanel):
-    """Bước 5: phụ đề."""
-
-    style_requested = Signal()
+class RunStep(_StepPanel):
+    """Bước 5: xem lại lựa chọn rồi chạy thật — tiến trình hiện ở cột trái."""
 
     def __init__(self, parent: QWidget | None = None):
-        super().__init__("Phụ đề",
-                         "Chọn cách hiện phụ đề trên video kết quả. Sau khi "
-                         "chạy xong bạn vẫn sửa được chữ và kiểu chữ trong "
-                         "Trình chỉnh sửa, không phải chạy lại.", parent)
-        from autodub.media.subtitle import PRESET_CHOICES
-
-        self.mode = LabeledCombo(
-            "Kiểu phụ đề", consts.SUBTITLE_MODES,
-            "Phụ đề rời là tệp riêng, người xem tự bật tắt. Ghi thẳng vào "
-            "hình thì chữ nằm luôn trên video.")
-        self.mode.changed.connect(self.changed.emit)
-        self.body.addWidget(self.mode)
-
-        self.preset = LabeledCombo(
-            "Bộ kiểu chữ", PRESET_CHOICES,
-            "Chọn một bộ có sẵn là xong. Muốn tự quyết từng thông số thì bấm "
-            "Kiểu chữ và vùng che.")
-        self.preset.changed.connect(self.changed.emit)
-        self.body.addWidget(self.preset)
-
-        row = QHBoxLayout()
-        row.setSpacing(tokens.SP_2)
-        self.btn_style = GhostButton("Kiểu chữ và vùng che…")
-        self.btn_style.clicked.connect(self.style_requested.emit)
-        row.addWidget(self.btn_style)
-        row.addStretch()
-        self.body.addLayout(row)
-
-        self.summary = QLabel("Kiểu mặc định, chưa che vùng nào")
-        self.summary.setWordWrap(True)
-        self.summary.setStyleSheet(
-            f"color: {tokens.TEXT_MUTED}; font-size: {tokens.FS_META}px; "
-            f"background: transparent;")
-        self.body.addWidget(self.summary)
-        self.finish()
-
-    def set_summary(self, text: str) -> None:
-        self.summary.setText(text)
-
-    def values(self) -> dict:
-        return {"subtitle_mode": self.mode.current_key(),
-                "subtitle_preset": self.preset.current_key()}
-
-    def load(self, data: dict) -> None:
-        self.mode.set_key(data.get("subtitle_mode", "none"))
-        self.preset.set_key(data.get("subtitle_preset", "clean"))
-
-
-class ExportStep(_StepPanel):
-    """Bước 6: nhạc nền và bảng tóm tắt trước khi chạy."""
-
-    def __init__(self, parent: QWidget | None = None):
-        super().__init__("Xuất video",
-                         "Chọn cách xử lý nhạc nền rồi xem lại toàn bộ lựa "
-                         "chọn trước khi bắt đầu.", parent)
-        self.background = LabeledCombo(
-            "Nhạc nền", consts.BG_MODES,
-            "Tách giọng gốc giữ được nhạc nền hay nhất nhưng chạy lâu hơn.")
-        self.background.changed.connect(self._on_background)
-        self.duck = LabeledSlider(
-            "Mức giảm tiếng gốc", -40.0, 0.0, 1.0,
-            "Càng âm thì tiếng gốc càng nhỏ khi có lời thoại tiếng Việt.",
-            " dB", decimals=0)
-        self.duck.set_value(-12.0)
-        self.duck.changed.connect(lambda _v: self.changed.emit())
-        self.audio_only = QCheckBox("Chỉ xuất âm thanh và phụ đề, bỏ ghép video")
-        self.audio_only.setToolTip(
-            "Bật khi bạn tự dựng video ở phần mềm khác và chỉ cần tiếng Việt "
-            "cùng tệp phụ đề.")
-        self.audio_only.toggled.connect(lambda _c: self.changed.emit())
-        self.body.addWidget(self.background)
-        self.body.addWidget(self.duck)
-        self.body.addWidget(self.audio_only)
-
+        super().__init__("Chạy dịch và lồng tiếng",
+                         "Xem lại các lựa chọn rồi bấm Bắt đầu lồng tiếng. "
+                         "Ứng dụng sẽ nghe, dịch và đọc toàn bộ video — "
+                         "tiến trình và nhật ký hiện ở khung bên trái.", parent)
         self.summary = QLabel("")
         self.summary.setWordWrap(True)
         self.summary.setTextFormat(Qt.TextFormat.RichText)
@@ -483,12 +566,17 @@ class ExportStep(_StepPanel):
             f"background: {tokens.BG_INPUT}; border-radius: 8px; "
             f"padding: 10px 12px;")
         self.body.addWidget(LabeledWidget("Tóm tắt lựa chọn", self.summary))
-        self.finish()
-        self._on_background()
 
-    def _on_background(self) -> None:
-        self.duck.setEnabled(self.background.current_key() == "duck")
-        self.changed.emit()
+        note = QLabel(
+            "Giá của video chốt ngay sau bước nghe-chép, theo số câu thoại "
+            "(10 Vox/câu, 12 nếu bật dịch tự động, +20 cho gói tiêu đề + mô "
+            "tả) và không đổi nữa — ứng dụng báo tổng Vox trước khi trừ ví.")
+        note.setWordWrap(True)
+        note.setStyleSheet(
+            f"color: {tokens.TEXT_MUTED}; font-size: {tokens.FS_META}px; "
+            f"background: transparent;")
+        self.body.addWidget(note)
+        self.finish()
 
     def set_summary(self, rows: list[tuple[str, str]]) -> None:
         """Đổ bảng tóm tắt hai cột."""
@@ -496,14 +584,81 @@ class ExportStep(_StepPanel):
         self.summary.setText("<br>".join(lines))
 
     def values(self) -> dict:
-        return {
-            "bg_mode": self.background.current_key(),
-            "bg_duck_db": self.duck.value(),
-            "skip_video": self.audio_only.isChecked(),
-        }
+        return {}
 
     def load(self, data: dict) -> None:
-        self.background.set_key(data.get("bg_mode", "demucs"))
-        self.duck.set_value(float(data.get("bg_duck_db", -12.0)))
-        self.audio_only.setChecked(bool(data.get("skip_video", False)))
-        self._on_background()
+        pass
+
+
+class ExportSummaryStep(_StepPanel):
+    """Bước 6: tổng kết lần chạy và chốt Vox khi bấm Xuất video.
+
+    Nút Xuất video là nút chính ở chân trang (do trang cha đổi nhãn khi
+    đến bước này) — bước chỉ lo hiển thị số liệu.
+    """
+
+    def __init__(self, parent: QWidget | None = None):
+        super().__init__("Xuất video",
+                         "Video đã lồng tiếng xong. Bấm Xuất video để nhận "
+                         "video hoàn chỉnh — Vox của video này đã tính từ "
+                         "đầu, bước này không tốn thêm.", parent)
+        self.summary = QLabel("Chưa có lần chạy nào chờ xuất.")
+        self.summary.setWordWrap(True)
+        self.summary.setTextFormat(Qt.TextFormat.RichText)
+        self.summary.setStyleSheet(
+            f"color: {tokens.TEXT_SECONDARY}; font-size: {tokens.FS_BODY}px; "
+            f"background: {tokens.BG_INPUT}; border-radius: 8px; "
+            f"padding: 12px 14px;")
+        self.body.addWidget(LabeledWidget("Tổng kết lần chạy", self.summary))
+
+        self.notice = QLabel(
+            "Chưa xuất thì chưa xem được bản dịch hay âm thanh — dữ liệu "
+            "đang được khóa. Bỏ qua bước này thì dự án tự mở khóa sau 48 "
+            "giờ, không tốn thêm Vox.")
+        self.notice.setWordWrap(True)
+        self.notice.setStyleSheet(
+            f"color: {tokens.TEXT_MUTED}; font-size: {tokens.FS_META}px; "
+            f"background: transparent;")
+        self.body.addWidget(self.notice)
+        self.finish()
+
+    @staticmethod
+    def _fmt_duration(seconds: float) -> str:
+        mins, secs = divmod(int(seconds or 0), 60)
+        return f"{mins} phút {secs:02d} giây" if mins else f"{secs} giây"
+
+    def set_stats(self, sentences: int, duration_s: float,
+                  usage: dict | None, hold: dict | None) -> None:
+        """Đổ bảng tổng kết: thời lượng, số câu thoại, tổng Vox, số dư.
+
+        Chỉ một con số tiền: TỔNG Vox của video, chốt từ lúc giữ chỗ và không
+        đổi nữa. Không tách theo bước xử lý — người dùng không trả theo bước,
+        bày ra chỉ khiến họ đi tìm cách tối ưu một thứ không tồn tại.
+
+        ``usage``: snapshot từ USAGE ({"calls", "vox", "balance_after"}).
+        ``hold``: dict hold từ máy chủ, dùng ``estimatedVox`` làm tổng.
+        """
+        total = int((hold or {}).get("estimatedVox")
+                    or (usage or {}).get("vox") or 0)
+        rows = [
+            ("Thời lượng video", self._fmt_duration(duration_s)),
+            ("Số câu thoại", f"{sentences:,}"),
+            ("Tổng Vox của video", f"<b>{total:,} Vox</b>"),
+        ]
+        balance = int((usage or {}).get("balance_after") or 0)
+        if balance:
+            rows.append(("Số dư còn lại", f"{balance:,} Vox"))
+        self.summary.setText(
+            "<br>".join(f"<b>{name}:</b> {value}" for name, value in rows))
+
+    def set_error(self, message: str) -> None:
+        """Xuất trượt (thường do mất mạng) — nói rõ không tốn thêm Vox."""
+        self.notice.setText(
+            f"Chưa xuất được: {message}\nKhông tốn thêm Vox nào và dữ liệu "
+            "vẫn được khóa an toàn. Kiểm tra mạng rồi bấm Xuất video lần nữa.")
+
+    def values(self) -> dict:
+        return {}
+
+    def load(self, data: dict) -> None:
+        pass

@@ -49,6 +49,11 @@ class PillTabBar(QWidget):
     def current_index(self) -> int:
         return max(self._group.checkedId(), 0)
 
+    def set_tab_text(self, index: int, label: str) -> None:
+        """Đổi nhãn một tab — dùng khi nhãn mang số đếm thay đổi theo dữ liệu."""
+        if 0 <= index < len(self._buttons):
+            self._buttons[index].setText(label)
+
     def set_current_index(self, index: int) -> None:
         """Chọn tab theo chỉ số và phát tín hiệu như khi người dùng bấm."""
         if 0 <= index < len(self._buttons):

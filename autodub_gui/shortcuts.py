@@ -43,6 +43,9 @@ GLOBAL_SHORTCUTS: tuple[Shortcut, ...] = (
 # Phím tắt chỉ có tác dụng trong Trình chỉnh sửa
 EDITOR_SHORTCUTS: tuple[Shortcut, ...] = (
     Shortcut("Space", "Phát hoặc tạm dừng video", "Trình chỉnh sửa"),
+    Shortcut("J", "Lùi 5 giây", "Trình chỉnh sửa"),
+    Shortcut("K", "Phát hoặc tạm dừng video", "Trình chỉnh sửa"),
+    Shortcut("L", "Tiến 5 giây", "Trình chỉnh sửa"),
     Shortcut("Ctrl+S", "Lưu phụ đề ngay", "Trình chỉnh sửa"),
     Shortcut("Ctrl+Z", "Hoàn tác", "Trình chỉnh sửa"),
     Shortcut("Ctrl+Shift+Z", "Làm lại", "Trình chỉnh sửa"),
@@ -117,6 +120,12 @@ def install_editor_shortcuts(page) -> list[QShortcut]:
     """
     created = [
         bind(page, "Space", page.toggle_play, skip_when_typing=True),
+        # J/K/L — bộ phím quen thuộc của dân dựng phim (lùi/dừng/tiến).
+        bind(page, "J", lambda: page.player.nudge_back(big=True),
+             skip_when_typing=True),
+        bind(page, "K", page.toggle_play, skip_when_typing=True),
+        bind(page, "L", lambda: page.player.nudge_forward(big=True),
+             skip_when_typing=True),
         bind(page, "Delete", page.delete_selected, skip_when_typing=True),
         bind(page, "Ctrl+S", page.save_now),
         bind(page, "Ctrl+Z", page.undo),

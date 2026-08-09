@@ -29,6 +29,7 @@ _STATUS_FILTERS = [
     ("Hoàn thành", projects_mod.STATUS_COMPLETED),
     ("Đang xử lý", projects_mod.STATUS_PROCESSING),
     ("Chờ dịch", projects_mod.STATUS_PENDING),
+    ("Chờ xuất video", projects_mod.STATUS_LOCKED),
     ("Lỗi", projects_mod.STATUS_FAILED),
 ]
 

@@ -10,6 +10,9 @@ continue.
 import os
 
 from autodub.languages import TargetLang
+from autodub.utils import setup_logging
+
+logger = setup_logging("autodub.translate_hint")
 
 # Spoken Vietnamese pace used to compute per-segment character budgets.
 # Default when no Settings value is supplied — overridable per run via
@@ -90,9 +93,12 @@ def payload_segment(seg: dict, cps_budget: float = CHARS_PER_SECOND_BUDGET) -> d
     starts, see :func:`annotate_slots`); ``duration`` is the fallback for
     transcripts produced before slots existed. ``cps_budget`` comes from
     ``settings.translate_cps_budget`` in the pipeline paths.
+
+    Chỉ gửi ``id``/``text``/``duration``: ``start``/``end`` không giúp gì cho
+    việc dịch (model chỉ cần biết câu dài bao nhiêu giây) mà nhân với hàng
+    nghìn câu là hàng chục nghìn token vô ích mỗi video.
     """
-    out = {k: seg[k] for k in ("id", "text", "start", "end", "duration")
-           if k in seg}
+    out = {k: seg[k] for k in ("id", "text", "duration") if k in seg}
     window = float(seg.get("slot") or seg.get("duration", 0) or 0)
     if window > 0:
         # Floor of 12 keeps ultra-short segments translatable at all.
@@ -174,11 +180,14 @@ def build_user_context_block(settings) -> str:
     if settings is None:
         return ""
     lines: list[str] = []
+    title = getattr(settings, "translate_video_title", "").strip()
     domain = getattr(settings, "translate_domain", "").strip()
     context = getattr(settings, "translate_context", "").strip()
     pronouns = getattr(settings, "translate_pronouns", "").strip()
     glossary = getattr(settings, "translate_glossary", "").strip()
     style = getattr(settings, "translate_style_notes", "").strip()
+    if title:
+        lines.append(f"- **Original video title**: {title}")
     if domain:
         lines.append(f"- **Video topic/domain**: {domain}")
     if context:
@@ -206,29 +215,56 @@ def build_user_context_block(settings) -> str:
             + "\n".join(lines) + "\n\n")
 
 
-def build_translation_prompt(target: TargetLang, source_lang: str,
-                             domain: str = "general",
-                             cps_budget: float = CHARS_PER_SECOND_BUDGET,
-                             settings=None) -> str:
-    """The full translation instruction block (STRICT format + style + pacing + consistency).
-    Shared across manual and automatic pipelines to ensure identical translation output quality.
+def _output_format_block(target: TargetLang, compact: bool) -> str:
+    """Đoạn OUTPUT FORMAT — phải KHỚP với định dạng nơi gọi thật sự nhận.
+
+    ``compact=True``: đường API (schema ép ``{"segments": [{id, text_vi}]}``)
+    — mô tả đúng format đó; bảo model "giữ nguyên mọi trường gốc" trong khi
+    schema cấm là tự mâu thuẫn, model yếu sẽ loạn.
+    ``compact=False``: đường dịch tay (file dán từ web AI) — người dùng lưu
+    nguyên mảng làm transcript nên PHẢI giữ đủ start/end/duration.
     """
     out_field = target.text_field
-    user_domain = getattr(settings, "translate_domain", "").strip() if settings else ""
-    if user_domain:
-        domain = user_domain
-    return f"""You are an expert translator specializing in ASR (Automatic Speech Recognition) transcripts for video dubbing.
-Your task is to translate an ASR transcript from {source_lang} to {target.name}.
-
-You will receive a JSON array of segments. Each segment contains: `id`, `text`, `start`, `end`, and `duration` (in seconds).
-
-{build_user_context_block(settings)}### OUTPUT FORMAT (STRICT)
+    if compact:
+        return f"""### OUTPUT FORMAT (STRICT)
+- Return EXACTLY ONE valid JSON object: {{"segments": [...]}} — same length, order and `id`s as the input.
+- Each output segment has EXACTLY two fields: `id` (copied from input) and `"{out_field}"` (the final {target.name} translation of that segment's `text`). Do NOT repeat `text`, `duration` or any other input field.
+- Every `"{out_field}"` value MUST end with terminal punctuation: `.`, `!`, `?` or `…`. If the sentence has no natural ending mark, append a period. NEVER end on a comma, a dash, or nothing.
+- Output strictly valid JSON ONLY — DO NOT use markdown code blocks, fences, or introductory/ending commentary."""
+    return f"""### OUTPUT FORMAT (STRICT)
 - Return EXACTLY ONE valid JSON array with the exact same length, order, and `id`s as the input.
 - Preserve every original field (`id`, `text`, `start`, `end`, `duration`).
 - ADD one new string field per segment: `"{out_field}"`.
 - `"{out_field}"` must contain the final {target.name} translation of the `text` field.
 - Every `"{out_field}"` value MUST end with terminal punctuation: `.`, `!`, `?` or `…`. If the sentence has no natural ending mark, append a period. NEVER end on a comma, a dash, or nothing.
-- Output strictly valid JSON ONLY — DO NOT use markdown code blocks, fences, or introductory/ending commentary.
+- Output strictly valid JSON ONLY — DO NOT use markdown code blocks, fences, or introductory/ending commentary."""
+
+
+def build_translation_prompt(target: TargetLang, source_lang: str,
+                             domain: str = "general",
+                             cps_budget: float = CHARS_PER_SECOND_BUDGET,
+                             settings=None,
+                             compact_output: bool = True) -> str:
+    """The full translation instruction block (STRICT format + style + pacing + consistency).
+    Shared across manual and automatic pipelines to ensure identical translation output quality.
+
+    ``compact_output``: True cho đường API (đầu ra ``{"segments": [{id,
+    text_vi}]}`` theo schema), False cho đường dịch tay (mảng đầy đủ giữ
+    nguyên timing để lưu thẳng làm transcript).
+    """
+    out_field = target.text_field
+    user_domain = getattr(settings, "translate_domain", "").strip() if settings else ""
+    if user_domain:
+        domain = user_domain
+    input_fields = ("`id`, `text`, `duration` (seconds) and usually `max_chars`"
+                    if compact_output else
+                    "`id`, `text`, `start`, `end`, and `duration` (in seconds)")
+    return f"""You are an expert translator specializing in ASR (Automatic Speech Recognition) transcripts for video dubbing.
+Your task is to translate an ASR transcript from {source_lang} to {target.name}.
+
+You will receive a JSON array of segments. Each segment contains: {input_fields}.
+
+{build_user_context_block(settings)}{_output_format_block(target, compact_output)}
 
 ### STYLE & TRANSLATION RULES
 {build_style_rules(target, domain=domain)}
@@ -269,7 +305,7 @@ If a segment fails any check, rewrite it into natural spoken Vietnamese before r
 
 
 def write_hint(work_dir: str, target: TargetLang, source_lang: str,
-               settings=None) -> str:
+               settings=None, refund_note: str = "") -> str:
     """Create ``<work_dir>/TRANSLATE_PENDING.txt`` and return its path.
 
     Viết cho NGƯỜI DÙNG PHỔ THÔNG: tiếng Việt, 3 bước, không thuật ngữ dev.
@@ -279,9 +315,11 @@ def write_hint(work_dir: str, target: TargetLang, source_lang: str,
     ``settings`` (nếu có) đưa ngữ cảnh video vào prompt — kể cả ngữ cảnh do
     lượt phân tích tự động đã lưu ở ``data/video_context.json``: dịch tay
     phải nhận được ĐÚNG prompt như dịch tự động, không phải bản chay.
-    """
-    import json as _json
 
+    ``refund_note`` là dòng trấn an về tiền: giá của video đã chốt từ đầu nên
+    phần dịch tay không phát sinh thêm Vox. Thấy pipeline dừng giữa đường mà
+    không ai nói gì về Vox thì người dùng mặc định là mình vừa mất tiền.
+    """
     from autodub.workdir import data_dir
 
     out_file = target.transcript_name
@@ -290,15 +328,52 @@ def write_hint(work_dir: str, target: TargetLang, source_lang: str,
 
     # Bơm ngữ cảnh phân tích (nếu lượt 0 đã chạy và lưu cache) vào settings,
     # y hệt đường dịch tự động — ô nào người dùng điền tay vẫn thắng.
+    # File này có thể đang mã hóa (lượt chạy có hold): đọc bằng read_json_secure
+    # với khóa của hold, nếu không thì ngữ cảnh người dùng ĐÃ TRẢ Vox để có bị
+    # âm thầm bỏ qua và prompt dịch tay thành bản chay.
     ctx_cache = os.path.join(d_dir, "video_context.json")
     if settings is not None and os.path.exists(ctx_cache):
         try:
-            with open(ctx_cache, encoding="utf-8") as f:
-                analysis = _json.load(f)
-            from autodub.text.translate_analysis import apply_analysis
+            from autodub import securestore
+            from autodub.text.translate_common import HOLD
+
+            analysis = securestore.read_json_secure(ctx_cache, HOLD.key or None)
+            from autodub.text.translate_saas import apply_analysis
             settings = apply_analysis(settings, analysis)
-        except (ValueError, OSError):
-            pass
+        except Exception as e:  # noqa: BLE001 — thiếu ngữ cảnh không được chặn hướng dẫn
+            logger.warning(f"Không đọc được ngữ cảnh video cho dịch tay: {e}")
+
+    # Tiêu đề video gốc (downloader lưu) — dịch tay nhận đúng ngữ cảnh như
+    # dịch tự động.
+    if settings is not None and not getattr(settings,
+                                            "translate_video_title", ""):
+        from autodub.workdir import load_video_meta
+        title = str(load_video_meta(work_dir).get("title", "")).strip()
+        if title:
+            import dataclasses
+            settings = dataclasses.replace(settings,
+                                           translate_video_title=title)
+
+    # Dịch tự động đang TẮT là lựa chọn của người dùng, không phải sự cố —
+    # gộp hai chuyện vào một câu khiến người tắt tưởng app hỏng, còn người
+    # gặp sự cố thì đi tìm cái công tắc họ chưa từng bật.
+    manual_by_choice = (settings is not None
+                        and not getattr(settings, "translate_enabled", True))
+    if manual_by_choice:
+        why = """Bạn đang để "Dịch tự động" TẮT trong Cài đặt, nên app nghe xong
+lời thoại rồi dừng lại chờ bản dịch của bạn. Cách làm ở dưới, khoảng 2-3 phút.
+
+MUỐN APP TỰ DỊCH: mở Cài đặt, bật "Dịch tự động" — app dịch giúp bạn toàn bộ
+lời thoại, tính thêm 2 Vox mỗi câu."""
+    else:
+        why = """App đã nghe xong lời thoại nhưng máy chủ dịch đang gặp sự cố.
+Không sao — bạn nhờ một AI miễn phí (ChatGPT, Gemini...) dịch giúp theo 3
+bước dưới đây, mất khoảng 2-3 phút.
+
+HOẶC: đợi một lúc rồi chạy lại video này. Phần đã nghe-chép được dùng lại
+nên không mất công, và phần nào đã dịch rồi cũng không bị tính Vox lần hai."""
+
+    money = f"\n{refund_note}\n" if refund_note else ""
 
     hint_path = os.path.join(work_dir, "TRANSLATE_PENDING.txt")
     with open(hint_path, "w", encoding="utf-8") as f:
@@ -306,15 +381,8 @@ def write_hint(work_dir: str, target: TargetLang, source_lang: str,
             f"""VIDEO ĐANG CHỜ BẢN DỊCH
 =======================
 
-App đã nghe xong lời thoại trong video nhưng chưa dịch được sang tiếng Việt
-(chưa bật dịch tự động, hoặc dịch tự động bị lỗi). Bạn chỉ cần nhờ một AI
-miễn phí (ChatGPT, Gemini...) dịch giúp — làm theo 3 bước dưới đây, mất
-khoảng 2-3 phút.
-
-CÁCH NHANH HƠN CHO LẦN SAU: mở trang Cài đặt của app, phần "Dịch tự động",
-điền API key Gemini miễn phí (lấy tại aistudio.google.com/apikey). Từ đó
-app tự dịch, không cần làm tay nữa.
-
+{why}
+{money}
 
 BƯỚC 1 — COPY NỘI DUNG CẦN DỊCH
 --------------------------------
@@ -357,7 +425,7 @@ mục, hoặc còn sót dòng ```json — kiểm tra lại 3 điểm đó rồi 
 ==================================================================
 LỜI NHẮN GỬI AI (copy nguyên khối bên dưới, không cần đọc hiểu)
 ==================================================================
-{build_translation_prompt(target, source_lang, settings=settings)}
+{build_translation_prompt(target, source_lang, settings=settings, compact_output=False)}
 
 Now translate this JSON, return only the translated JSON array:
 

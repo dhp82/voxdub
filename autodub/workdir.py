@@ -50,6 +50,22 @@ def data_path(work_dir: str, *names: str, create_dir: bool = False) -> str:
     return os.path.join(data_dir(work_dir, create=create_dir), *names)
 
 
+def load_video_meta(work_dir: str) -> dict:
+    """Title/uploader của video nguồn (``data/video_meta.json``).
+
+    Downloader ghi file này lúc tải; trả về ``{}`` khi chưa có hoặc hỏng —
+    title chỉ là ngữ cảnh bổ sung, thiếu không được làm hỏng bước nào.
+    """
+    import json
+    try:
+        with open(data_path(work_dir, "video_meta.json"),
+                  encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
 def youtube_dir(work_dir: str, create: bool = False) -> str:
     """Directory holding YouTube metadata + thumbnails (user-facing)."""
     if is_legacy_layout(work_dir):

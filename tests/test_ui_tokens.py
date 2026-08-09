@@ -69,12 +69,26 @@ def test_tokens_module_defines_core_palette() -> None:
         assert hasattr(tokens, name), f"tokens.py thiếu {name}"
 
 
-def test_no_pure_black_and_no_white_border() -> None:
-    """Nền tối nhất không được là đen thuần; viền không được sáng quá mức."""
+def _luminance(hex_color: str) -> int:
+    """Tổng ba kênh RGB — đủ để so 'sáng hơn / tối hơn' giữa hai màu."""
+    h = hex_color.lstrip("#")
+    return int(h[0:2], 16) + int(h[2:4], 16) + int(h[4:6], 16)
+
+
+def test_dark_theme_contrast_rules() -> None:
+    """Dark theme: nền app không thuần đen/trắng; chữ phải SÁNG hơn nền.
+
+    Quy tắc dark theme (ngược light theme):
+    - TEXT_PRIMARY sáng hơn BG_PANEL (chữ nổi trên nền)
+    - BORDER_DEFAULT tối hơn TEXT_MUTED (viền không lấn át chữ)
+    """
     from autodub_gui import tokens
 
-    assert tokens.BG_APP.lower() != "#000000"
-    assert tokens.BORDER_DEFAULT.lower() <= "#273449"
+    assert tokens.BG_APP.lower() not in ("#000000", "#ffffff")
+    # Dark theme: chữ sáng hơn nền
+    assert _luminance(tokens.TEXT_PRIMARY) > _luminance(tokens.BG_PANEL)
+    # Dark theme: viền tối hơn hoặc bằng chữ muted
+    assert _luminance(tokens.BORDER_DEFAULT) <= _luminance(tokens.TEXT_MUTED)
 
 
 def test_theme_stylesheet_builds_from_tokens() -> None:

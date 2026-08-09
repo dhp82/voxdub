@@ -87,7 +87,11 @@ def warnings_of(results: list[CheckResult]) -> list[CheckResult]:
 def _check_ffmpeg(settings: Settings) -> CheckResult:
     """FFmpeg có mặt và có bộ lọc phụ đề (libass) không."""
     title = "FFmpeg"
-    if not shutil.which("ffmpeg"):
+    # Kiểm tra cả thư mục bin/ cục bộ (tải bởi wizard) lẫn PATH hệ thống
+    local_ffmpeg = os.path.join(app_root(), "bin", "ffmpeg.exe")
+    ffmpeg_cmd = shutil.which("ffmpeg") or (
+        local_ffmpeg if os.path.isfile(local_ffmpeg) else None)
+    if not ffmpeg_cmd:
         return CheckResult(
             key="ffmpeg", title=title, level="fail",
             message="Máy chưa có FFmpeg.",
@@ -96,7 +100,7 @@ def _check_ffmpeg(settings: Settings) -> CheckResult:
                    "sau đó mở lại ứng dụng.")
     try:
         out = subprocess.run(
-            ["ffmpeg", "-hide_banner", "-filters"],
+            [ffmpeg_cmd, "-hide_banner", "-filters"],
             capture_output=True, text=True, timeout=_SUBPROCESS_TIMEOUT,
         ).stdout
     except (OSError, subprocess.TimeoutExpired):
@@ -203,15 +207,18 @@ def _check_ram(settings: Settings) -> CheckResult:
 
 
 def _check_vieneu(settings: Settings) -> CheckResult:
-    """Bộ giọng VieNeu — bắt buộc, không có thì không tạo được giọng."""
+    """Bộ giọng VieNeu — chỉ cần cho giọng offline, không phải cho cả app."""
     if settings.vieneu_configured():
         return CheckResult(key="vieneu", title="Bộ giọng đọc VieNeu",
                            level="ok", message="Đã cài.")
+    # Không còn là lỗi chặn: 22 giọng CapCut chạy qua mạng, không cần model
+    # trên máy — chặn ở đây thì máy chưa cài VieNeu không mở nổi ứng dụng.
     return CheckResult(
-        key="vieneu", title="Bộ giọng đọc VieNeu", level="fail",
-        message="Bộ giọng đọc tiếng Việt chưa được cài.",
-        advice="Mở cửa sổ dòng lệnh tại thư mục ứng dụng rồi chạy: "
-               "py scripts/setup_vieneu.py — cài một lần, khoảng vài phút.")
+        key="vieneu", title="Bộ giọng đọc VieNeu", level="warn",
+        message="Chưa cài — hiện chỉ dùng được bộ giọng CapCut (cần mạng).",
+        advice="Muốn lồng tiếng offline thì mở cửa sổ dòng lệnh tại thư mục "
+               "ứng dụng rồi chạy: py scripts/setup_vieneu.py — cài một lần, "
+               "khoảng vài phút.")
 
 
 def _check_asr(settings: Settings) -> CheckResult:

@@ -54,7 +54,7 @@ class ChipRow(QWidget):
         caption.setMinimumWidth(86)
         layout.addWidget(caption)
 
-        for text, key in [("Tất cả", _ANY), *options]:
+        for text, key in [("All", _ANY), *options]:
             chip = FilterChip(text, key)
             self._group.addButton(chip)
             self._chips.append(chip)

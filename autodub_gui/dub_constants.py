@@ -19,28 +19,11 @@ ASR_ENGINES: list[tuple[str, str]] = [
 
 WHISPER_MODELS: list[tuple[str, str]] = [
     ("Tự chọn (khuyên dùng)", "auto"),
-    ("Nhanh nhất (tiny) — khoảng 75 MB", "tiny"),
-    ("Nhanh (base) — khoảng 145 MB", "base"),
-    ("Khá (small) — khoảng 480 MB", "small"),
-    ("Chính xác (medium) — khoảng 1.5 GB", "medium"),
-    ("Chính xác nhất (large-v3) — khoảng 3.1 GB", "large-v3"),
-]
-
-#: Nơi dịch, theo đúng thứ tự hiện trong Cài đặt. Khóa khớp
-#: :data:`autodub.config.TRANSLATE_ENGINES`.
-TRANSLATE_ENGINE_CHOICES: list[tuple[str, str]] = [
-    ("OpenRouter — một mã dùng được mọi mô hình", "openrouter"),
-    ("Google Gemini", "gemini"),
-    ("OpenAI", "openai"),
-    ("Anthropic", "anthropic"),
-    ("DeepSeek", "deepseek"),
-    ("Khác — tự điền địa chỉ và mô hình", "custom"),
-]
-
-#: Thêm mục "theo cài đặt chung" cho ô chọn ở trang Tạo dự án.
-TRANSLATE_ENGINES: list[tuple[str, str]] = [
-    ("Theo cài đặt chung", ""),
-    *TRANSLATE_ENGINE_CHOICES,
+    ("Nhanh nhất (tiny)", "tiny"),
+    ("Nhanh (base)", "base"),
+    ("Khá (small)", "small"),
+    ("Chính xác (medium)", "medium"),
+    ("Chính xác nhất (large-v3)", "large-v3"),
 ]
 
 BG_MODES: list[tuple[str, str]] = [
@@ -87,21 +70,19 @@ MODEL_SIZES: dict[str, str] = {
 FRIENDLY_ERRORS: list[tuple[str, str, str]] = [
     ("Thiếu cấu hình bắt buộc", "Thiếu cấu hình",
      "Mở trang Cài đặt và điền các mục còn trống, rồi chạy lại."),
-    ("API Key Gemini không hợp lệ", "API Key Gemini không đúng",
-     "Kiểm tra lại mã ở trang Cài đặt, thẻ Kết nối. Lấy mã miễn phí tại "
-     "aistudio.google.com/apikey."),
-    ("hết lượt miễn phí", "Gemini đã hết lượt miễn phí",
-     "Đợi vài phút rồi thử lại, hoặc đổi sang nơi dịch khác trong Cài đặt."),
-    ("hết hạn mức", "Nơi dịch đã hết hạn mức",
-     "Đợi vài phút rồi thử lại, nạp thêm hạn mức, hoặc đổi sang nơi dịch "
-     "khác trong trang Cài đặt."),
-    ("không hợp lệ hoặc đã hết hạn", "API Key không đúng",
-     "Kiểm tra lại API Key ở trang Cài đặt, thẻ Kết nối."),
-    ("không có mô hình", "Tên mô hình không đúng",
-     "Kiểm tra lại ô Mô hình ở trang Cài đặt, thẻ Kết nối."),
-    ("chạm trần token", "Lô dịch quá lớn",
-     "Giảm mục «Số câu mỗi lượt gửi» ở trang Cài đặt, thẻ Kết nối, rồi chạy "
-     "tiếp thư mục dự án đang dở."),
+    ("Không đủ Vox", "Hết Vox",
+     "Mở trang Tài khoản để nạp thêm, rồi chạy tiếp thư mục dự án đang dở. "
+     "Phần đã dịch xong vẫn được giữ nguyên, không phải trả tiền lần nữa."),
+    ("Không kết nối được máy chủ", "Mất kết nối máy chủ",
+     "Kiểm tra mạng rồi chạy tiếp thư mục dự án đang dở. Phần đã dịch xong "
+     "vẫn được giữ nguyên."),
+    ("đang bảo trì", "Máy chủ đang bảo trì",
+     "Thử lại sau ít phút. Các bước chạy trên máy (nghe chép, giọng đọc, "
+     "xuất video) vẫn dùng bình thường."),
+    ("Thiết bị này đã bị khóa", "Thiết bị bị khóa",
+     "Liên hệ hỗ trợ kèm mã máy hiện ở trang Tài khoản."),
+    ("Máy chủ đang bận", "Máy chủ đang quá tải",
+     "Chờ một chút rồi chạy tiếp thư mục dự án đang dở."),
     ("CUDA out of memory", "Card đồ họa không đủ bộ nhớ",
      "Đóng bớt ứng dụng đang dùng card đồ họa như trò chơi hoặc trình duyệt "
      "mở nhiều video, hoặc đổi Nhạc nền sang Giảm nhỏ tiếng gốc cho nhẹ hơn, "

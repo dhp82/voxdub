@@ -17,7 +17,13 @@ import os
 import subprocess
 import threading
 
-from autodub.utils import bundled_file, gpu_venv_dir, setup_logging
+from autodub.resources import GPU_LOCK
+from autodub.utils import (
+    bundled_file,
+    ffmpeg_timeout_s,
+    gpu_venv_dir,
+    setup_logging,
+)
 
 logger = setup_logging("autodub.vocal_separator")
 
@@ -82,7 +88,13 @@ class DemucsCache:
         return True
 
     def _read_line(self, timeout: float) -> str:
-        """Đọc một dòng stdout với thời hạn (thread — Windows không select được pipe)."""
+        """Đọc một dòng stdout với thời hạn (thread — Windows không select được pipe).
+
+        Hết hạn thì GIẾT tiến trình con trước khi ném lỗi: không làm vậy,
+        ``readline()`` nằm chặn mãi và thread đọc sống tới hết phiên, ghim theo
+        cả handle pipe. Mọi caller đều coi timeout là cache chết hẳn
+        (``_shutdown()`` + ``_failed = True``) nên giết ở đây không mất gì.
+        """
         result: list[str] = []
 
         def _read() -> None:
@@ -92,6 +104,12 @@ class DemucsCache:
         t.start()
         t.join(timeout)
         if t.is_alive() or not result or not result[0]:
+            if self._proc is not None and self._proc.poll() is None:
+                try:
+                    self._proc.kill()
+                except OSError:
+                    pass
+                t.join(2.0)
             raise RuntimeError("Demucs serve worker timed out or died")
         return result[0]
 
@@ -269,10 +287,14 @@ def _run_demucs_gpu_worker(
         cmd.append("--chunked")
     logger.info(f"Running Demucs ({model_name}) in GPU worker on {input_wav}")
     try:
+        # GPU_LOCK: pipeline đã *dự đoán* ASR không dùng GPU trước khi cho hai
+        # việc chạy song song. Lock là lưới an toàn cho lúc dự đoán sai — khi
+        # đó hai việc chạy lần lượt (chậm) chứ không CUDA OOM (mất cả lượt).
         # timeout: video 1-2h hợp lệ mất nhiều phút, nhưng CUDA init treo
         # hoặc tải model kẹt thì không được khóa pipeline vĩnh viễn.
-        result = subprocess.run(cmd, capture_output=True, encoding="utf-8",
-                                errors="replace", timeout=3600)
+        with GPU_LOCK:
+            result = subprocess.run(cmd, capture_output=True, encoding="utf-8",
+                                    errors="replace", timeout=3600)
     except subprocess.TimeoutExpired:
         logger.warning("Demucs GPU worker quá 60 phút — chuyển sang CPU")
         return False
@@ -305,7 +327,12 @@ def _run_demucs(input_wav: str, vocals_out: str, no_vocals_out: str, model_name:
 
 
 def _normalize(src: str, dst: str, sample_rate: str, channels: int = 1) -> None:
-    """Re-encode raw stem to PCM at the pipeline's rate/channel layout."""
+    """Re-encode raw stem to PCM at the pipeline's rate/channel layout.
+
+    ``timeout`` là bắt buộc theo quy ước ở :func:`autodub.utils.ffmpeg_timeout_s`:
+    không có nó thì một ffmpeg kẹt (file bị khóa trên Windows, codec lỗi) treo cả
+    pipeline vĩnh viễn và không hủy được.
+    """
     cmd = [
         "ffmpeg", "-y", "-i", src,
         "-ac", str(channels),
@@ -313,9 +340,25 @@ def _normalize(src: str, dst: str, sample_rate: str, channels: int = 1) -> None:
         "-acodec", "pcm_s16le",
         dst,
     ]
-    result = subprocess.run(
-        cmd, capture_output=True, encoding="utf-8", errors="replace"
-    )
+    try:
+        result = subprocess.run(
+            cmd, capture_output=True, encoding="utf-8", errors="replace",
+            timeout=ffmpeg_timeout_s(_probe_duration_s(src)),
+        )
+    except subprocess.TimeoutExpired as exc:
+        # Cùng dạng lỗi với nhánh thất bại bên dưới nên caller ở :204 vẫn rơi
+        # đúng vào fallback "nền im lặng".
+        raise RuntimeError(f"ffmpeg normalize timed out for {src}") from exc
     if result.returncode != 0 or not os.path.exists(dst) or os.path.getsize(dst) == 0:
         tail = (result.stderr or "")[-300:].strip()
         raise RuntimeError(f"ffmpeg normalize failed for {src}: {tail}")
+
+
+def _probe_duration_s(path: str) -> float | None:
+    """Thời lượng file, hoặc None nếu không đọc được (trần 1 giờ được dùng)."""
+    try:
+        from autodub.media.audio import wav_duration_s
+
+        return wav_duration_s(path)
+    except Exception:  # noqa: BLE001 — chỉ để tính timeout, không đáng làm hỏng
+        return None

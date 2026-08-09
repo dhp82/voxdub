@@ -33,7 +33,8 @@ def _tag_text(voice) -> str:
     country = ({k: t for t, k in COUNTRIES}.get(voice.country, "")
                if voice.country != "vn" else "")
     style = {k: t for t, k in STYLES}.get(voice.style, "")
-    extra = "Giọng bạn thêm" if voice.custom else ""
+    extra = ("CapCut" if voice.is_capcut
+             else "Giọng bạn thêm" if voice.custom else "")
     return " · ".join(p for p in (gender, country, style, extra) if p)
 
 
@@ -107,6 +108,7 @@ class _VoicePopup(QFrame):
         self._voices: list = []
         self._current = ""
         self._selected_row: _VoiceRow | None = None
+        self._src_tab = 0                # 0 = offline, 1 = capcut
 
         root = QVBoxLayout(self)
         root.setContentsMargins(tokens.SP_2, tokens.SP_2,
@@ -120,6 +122,25 @@ class _VoicePopup(QFrame):
                                QLineEdit.ActionPosition.LeadingPosition)
         self._search.textChanged.connect(lambda _t: self._rebuild())
         root.addWidget(self._search)
+
+        # Tab nguồn — chỉ hiện khi catalog có giọng CapCut.
+        from autodub_gui.ui.pill_tabs import PillTabBar
+
+        self._src_tabs = PillTabBar()
+        self._src_tabs.add_tab("Giọng offline")
+        self._src_tabs.add_tab("CapCut")
+        self._src_tabs.changed.connect(self._on_src_tab)
+        self._src_tabs.setVisible(False)
+        root.addWidget(self._src_tabs)
+
+        # CapCut đọc qua máy chủ — nói trước ở đây, đừng để người dùng chọn
+        # xong rồi mới gặp lỗi mạng giữa lúc lồng tiếng.
+        self._online_hint = QLabel("Giọng CapCut cần kết nối mạng.")
+        self._online_hint.setStyleSheet(
+            f"color: {tokens.TEXT_MUTED}; font-size: {tokens.FS_META}px; "
+            f"background: transparent; padding: 0 4px;")
+        self._online_hint.setVisible(False)
+        root.addWidget(self._online_hint)
 
         self._scroll = QScrollArea()
         self._scroll.setWidgetResizable(True)
@@ -143,12 +164,22 @@ class _VoicePopup(QFrame):
 
     def open_for(self, anchor: QWidget, voices: list, current: str) -> None:
         """Hiện ngay dưới nút, rộng bằng nút (tối thiểu _POPUP_MIN_W)."""
+        from autodub.speech.tts.voices import source_group
+
         self._voices = voices
         self._current = current
         self._search.clear()
-        self._rebuild()
+        # Tab nguồn chỉ có nghĩa khi thật sự có giọng CapCut; mở bảng thì
+        # nhảy sẵn vào tab chứa giọng đang chọn.
+        has_capcut = any(source_group(v) == "capcut" for v in voices)
+        self._src_tabs.setVisible(has_capcut)
+        picked = next((v for v in voices if v.name == current), None)
+        self._src_tab = (1 if has_capcut and picked is not None
+                         and source_group(picked) == "capcut" else 0)
+        self._src_tabs.set_current_index(self._src_tab)   # signal bị chặn vì
+        self._rebuild()                                   # index không đổi
         width = max(anchor.width(), _POPUP_MIN_W)
-        rows = min(len(voices), _POPUP_MAX_ROWS)
+        rows = min(self._visible_count(), _POPUP_MAX_ROWS) or 1
         self._scroll.setFixedHeight(rows * (_ROW_H + 2) + tokens.SP_1)
         self.setFixedWidth(width)
         self.adjustSize()
@@ -160,6 +191,25 @@ class _VoicePopup(QFrame):
         if self._selected_row is not None:
             self._scroll.ensureWidgetVisible(self._selected_row, 0, 0)
 
+    def _visible_count(self) -> int:
+        """Số giọng thuộc tab nguồn đang mở (chưa tính ô tìm kiếm)."""
+        return len(self._tab_voices())
+
+    def _tab_voices(self) -> list:
+        """Giọng thuộc tab nguồn đang chọn; tab ẩn thì trả cả danh sách."""
+        if not self._src_tabs.isVisible():
+            return self._voices
+        from autodub.speech.tts.voices import source_group
+
+        want = "capcut" if self._src_tab == 1 else "offline"
+        return [v for v in self._voices if source_group(v) == want]
+
+    def _on_src_tab(self, index: int) -> None:
+        if index == self._src_tab:
+            return
+        self._src_tab = index
+        self._rebuild()
+
     def _rebuild(self) -> None:
         while self._list.count():
             item = self._list.takeAt(0)
@@ -167,8 +217,10 @@ class _VoicePopup(QFrame):
             if widget is not None:
                 widget.deleteLater()
         self._selected_row = None
+        self._online_hint.setVisible(self._src_tabs.isVisible()
+                                     and self._src_tab == 1)
         query = self._search.text().strip()
-        matched = [v for v in self._voices if v.matches(query=query)]
+        matched = [v for v in self._tab_voices() if v.matches(query=query)]
         self._empty.setVisible(not matched)
         for voice in matched:
             selected = voice.name == self._current
@@ -304,11 +356,11 @@ class VoicePicker(QWidget):
 
         try:
             self._voices = self._catalog.catalog(settings or Settings.load())
-        except Exception:  # noqa: BLE001 — thiếu tệp thì dùng bộ đóng kèm
-            self._voices = list(self._catalog.BUILTIN)
+        except Exception:  # noqa: BLE001 — thiếu tệp thì để catalog rỗng
+            self._voices = []
         if not self._current or all(
                 v.name != self._current for v in self._voices):
-            self._current = self._catalog.DEFAULT_VOICE
+            self._current = self._voices[0].name if self._voices else ""
         self._sync()
 
     def _voice_of(self, name: str):

@@ -42,7 +42,9 @@ def captured(monkeypatch):
 
     monkeypatch.setattr(video_mod.subprocess, "run", fake_run)
     monkeypatch.setattr(video_mod, "probe_dimensions", lambda p: (1920, 1080))
-    monkeypatch.setattr(video_mod, "_nvenc_available", lambda: False)
+    monkeypatch.setattr(video_mod, "_resolve_encoder", lambda: (
+        "CPU (libx264)",
+        ("-c:v", "libx264", "-preset", "veryfast", "-crf", "20")))
     return calls
 
 
@@ -122,7 +124,9 @@ def test_blur_skipped_when_regions_empty(paths, captured):
 
 
 def test_reencode_uses_nvenc_when_available(paths, captured, monkeypatch):
-    monkeypatch.setattr(video_mod, "_nvenc_available", lambda: True)
+    monkeypatch.setattr(video_mod, "_resolve_encoder", lambda: (
+        "NVIDIA NVENC",
+        ("-c:v", "h264_nvenc", "-preset", "p5", "-cq", "23", "-b:v", "0")))
     video_mod.merge_video(
         paths["video"], paths["audio"], paths["out"],
         srt_path=paths["srt"], subtitle_mode="burn")

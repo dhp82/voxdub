@@ -2,13 +2,53 @@
 import os
 import shutil
 import subprocess
+import threading
 from concurrent.futures import ThreadPoolExecutor
 
 from pydub import AudioSegment
 
+from autodub.resources import FFMPEG_SLOTS
 from autodub.utils import setup_logging, ensure_dir, ffmpeg_timeout_s, seg_wav_path
 
 logger = setup_logging("autodub.audio")
+
+
+class FallbackCounter:
+    """Sổ ghi các câu phải dùng bản dự phòng, an toàn đa luồng.
+
+    Các nhánh fallback ở đây (atempo lỗi → giữ clip tốc độ gốc, hậu kỳ lỗi →
+    giữ clip thô) là CỐ Ý: thiếu clip thì các bước sau hiểu là "câu mất" và
+    video câm hẳn đoạn đó, tệ hơn hẳn một câu sai tốc độ. Nhưng nuốt im lặng
+    thì người dùng nghe thấy chất lượng tệ mà không biết vì sao. Đếm ở đây rồi
+    đưa lên ``quality_report.json`` làm chuyện đó giải thích được.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._events: dict[str, list] = {}
+
+    def reset(self) -> None:
+        with self._lock:
+            self._events.clear()
+
+    def add(self, kind: str, seg_id) -> None:
+        with self._lock:
+            self._events.setdefault(kind, []).append(seg_id)
+
+    def snapshot(self) -> dict[str, list]:
+        with self._lock:
+            return {k: list(v) for k, v in self._events.items()}
+
+
+#: Sổ chung cho cả lượt chạy — pipeline reset cùng chỗ với ``USAGE``.
+FALLBACKS = FallbackCounter()
+
+
+def _seg_id_from_path(path: str):
+    """Số câu suy từ tên tệp ``seg_00012.wav``, hoặc chính tên tệp nếu lạ."""
+    name = os.path.splitext(os.path.basename(path))[0]
+    digits = name.rpartition("_")[2]
+    return int(digits) if digits.isdigit() else name
 
 # Trần thời gian cho ffmpeg trên MỘT segment (vài giây audio) — 120 s là
 # rộng rãi gấp trăm lần bình thường; quá mức đó chắc chắn là treo.
@@ -41,10 +81,12 @@ def apply_atempo(src: str, dst: str, speed: float) -> bool:
     """
     tmp = dst + ".atempo.tmp.wav"
     try:
-        result = subprocess.run(
-            ["ffmpeg", "-y", "-i", src, "-filter:a", f"atempo={speed:.3f}", tmp],
-            capture_output=True, text=True, timeout=_SEG_TIMEOUT_S,
-        )
+        with FFMPEG_SLOTS:
+            result = subprocess.run(
+                ["ffmpeg", "-y", "-i", src,
+                 "-filter:a", f"atempo={speed:.3f}", tmp],
+                capture_output=True, text=True, timeout=_SEG_TIMEOUT_S,
+            )
         failed = (result.returncode != 0 or not os.path.exists(tmp)
                   or os.path.getsize(tmp) == 0)
         err = result.stderr[:200] if failed else ""
@@ -52,6 +94,7 @@ def apply_atempo(src: str, dst: str, speed: float) -> bool:
         failed, err = True, f"ffmpeg treo quá {_SEG_TIMEOUT_S}s"
     if failed:
         logger.error(f"atempo {speed:.2f}x failed on {src}: {err}")
+        FALLBACKS.add("atempo_failed", _seg_id_from_path(src))
         if os.path.exists(tmp):
             os.remove(tmp)
         if src != dst:
@@ -100,6 +143,40 @@ def extract_audio(video_path: str, output_path: str, sample_rate: int = 16000,
     return output_path
 
 
+def extract_audio_dual(video_path: str, asr_path: str, hq_path: str,
+                       asr_rate: int = 16000) -> None:
+    """Rút CẢ HAI bản audio (16 kHz mono ASR + 44.1 kHz stereo nền) trong
+    MỘT lệnh ffmpeg — video chỉ bị giải mã một lần thay vì hai.
+
+    Lỗi thì xoá file dở dang và ném lên; lớp gọi tự rơi về hai lệnh rời.
+    """
+    if not os.path.exists(video_path):
+        raise FileNotFoundError(f"Video not found: {video_path}")
+
+    cmd = [
+        "ffmpeg", "-y", "-i", video_path,
+        "-vn", "-ar", str(asr_rate), "-ac", "1", "-acodec", "pcm_s16le",
+        asr_path,
+        "-vn", "-ar", "44100", "-ac", "2", "-acodec", "pcm_s16le",
+        hq_path,
+    ]
+    logger.info(f"Extracting audio (1 pass, 2 outputs): {video_path}")
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True,
+                                timeout=ffmpeg_timeout_s(None))
+    except subprocess.TimeoutExpired:
+        result = None
+    ok = (result is not None and result.returncode == 0
+          and os.path.exists(asr_path) and os.path.getsize(asr_path) > 0
+          and os.path.exists(hq_path) and os.path.getsize(hq_path) > 0)
+    if not ok:
+        for p in (asr_path, hq_path):
+            if os.path.exists(p):
+                os.remove(p)
+        err = ("ffmpeg treo" if result is None else result.stderr[:200])
+        raise RuntimeError(f"Dual audio extract failed: {err}")
+
+
 def slow_segments(
     segments: list[dict],
     src_dir: str,
@@ -124,11 +201,18 @@ def slow_segments(
         if not os.path.exists(src):
             return
         dst = os.path.join(dst_dir, os.path.basename(src))
+        # Resume-safe: đầu ra còn mới hơn nguồn thì khỏi chạy lại ffmpeg —
+        # chạy lại video 900 câu không tốn thêm 900 lệnh atempo vô ích.
+        if (os.path.exists(dst) and os.path.getsize(dst) > 0
+                and os.path.getmtime(dst) >= os.path.getmtime(src)):
+            return
         try:
-            result = subprocess.run(
-                ["ffmpeg", "-y", "-i", src, "-filter:a", f"atempo={factor}", dst],
-                capture_output=True, text=True, timeout=_SEG_TIMEOUT_S,
-            )
+            with FFMPEG_SLOTS:
+                result = subprocess.run(
+                    ["ffmpeg", "-y", "-i", src,
+                     "-filter:a", f"atempo={factor}", dst],
+                    capture_output=True, text=True, timeout=_SEG_TIMEOUT_S,
+                )
             failed = (result.returncode != 0 or not os.path.exists(dst)
                       or os.path.getsize(dst) == 0)
             err = result.stderr[:120] if failed else ""
@@ -139,6 +223,7 @@ def slow_segments(
             # file thiếu là "segment missing" và video bị câm đoạn đó.
             logger.error(f"atempo lỗi trên {os.path.basename(src)} — "
                          f"giữ tốc độ gốc ({err})")
+            FALLBACKS.add("atempo_failed", seg["id"])
             shutil.copyfile(src, dst)
 
     with ThreadPoolExecutor(max_workers=max_workers or _FFMPEG_WORKERS) as pool:
@@ -152,7 +237,8 @@ _VOICE_FADE_MS = 15
 
 
 def postprocess_voice_clip(src: str, dst: str,
-                           target_lufs: float = -16.0) -> bool:
+                           target_lufs: float = -16.0,
+                           speed: float = 1.0) -> bool:
     """Broadcast-clean one TTS clip: highpass, loudness, fades.
 
     One ffmpeg pass per clip:
@@ -181,19 +267,31 @@ def postprocess_voice_clip(src: str, dst: str,
     except (OSError, EOFError):
         pass
     fade_s = _VOICE_FADE_MS / 1000.0
+    # atempo gộp luôn vào đây: mỗi câu chỉ còn MỘT lệnh ffmpeg thay vì hai
+    # (hậu kỳ rồi VOICE_SPEED). Fade phải tính trên thời lượng SAU khi đổi
+    # tốc độ, nên atempo đứng trước afade.
+    tempo = speed if speed > 0 else 1.0
+    speed_filter = ""
+    out_dur = dur
+    if abs(tempo - 1.0) >= 0.005:
+        tempo = min(2.0, max(0.5, tempo))
+        speed_filter = f"atempo={tempo:.3f},"
+        out_dur = dur / tempo
     filters = (
         f"highpass=f=80,"
         f"loudnorm=I={target_lufs}:TP=-1.5:LRA=11,"
+        f"{speed_filter}"
         f"afade=t=in:st=0:d={fade_s},"
-        f"afade=t=out:st={max(0.0, dur - fade_s):.3f}:d={fade_s}"
+        f"afade=t=out:st={max(0.0, out_dur - fade_s):.3f}:d={fade_s}"
     )
     tmp = dst + ".post.tmp.wav"
     try:
-        result = subprocess.run(
-            ["ffmpeg", "-y", "-i", src, "-filter:a", filters,
-             "-ar", str(src_rate), "-acodec", "pcm_s16le", tmp],
-            capture_output=True, text=True, timeout=_SEG_TIMEOUT_S,
-        )
+        with FFMPEG_SLOTS:
+            result = subprocess.run(
+                ["ffmpeg", "-y", "-i", src, "-filter:a", filters,
+                 "-ar", str(src_rate), "-acodec", "pcm_s16le", tmp],
+                capture_output=True, text=True, timeout=_SEG_TIMEOUT_S,
+            )
         failed = (result.returncode != 0 or not os.path.exists(tmp)
                   or os.path.getsize(tmp) == 0)
         err = result.stderr[:120] if failed else ""
@@ -202,6 +300,7 @@ def postprocess_voice_clip(src: str, dst: str,
     if failed:
         logger.warning(f"Hậu kỳ giọng lỗi trên {os.path.basename(src)} — "
                        f"giữ clip thô ({err})")
+        FALLBACKS.add("postprocess_failed", _seg_id_from_path(src))
         if os.path.exists(tmp):
             os.remove(tmp)
         if src != dst:
@@ -213,7 +312,9 @@ def postprocess_voice_clip(src: str, dst: str,
 
 def postprocess_voice_clips(segments: list[dict], src_dir: str, dst_dir: str,
                             target_lufs: float = -16.0,
-                            max_workers: int | None = None) -> str:
+                            max_workers: int | None = None,
+                            speed: float = 1.0,
+                            on_done=None) -> str:
     """Post-process every segment clip into ``dst_dir`` (parallel ffmpeg).
 
     Skips clips whose processed output already exists and is newer than the
@@ -229,10 +330,22 @@ def postprocess_voice_clips(segments: list[dict], src_dir: str, dst_dir: str,
         if (os.path.exists(dst) and os.path.getsize(dst) > 0
                 and os.path.getmtime(dst) >= os.path.getmtime(src)):
             return
-        postprocess_voice_clip(src, dst, target_lufs)
+        postprocess_voice_clip(src, dst, target_lufs, speed=speed)
+
+    done = 0
+    lock = threading.Lock()
+
+    def _tracked(seg: dict) -> None:
+        nonlocal done
+        _one(seg)
+        if on_done is not None:
+            with lock:
+                done += 1
+                n = done
+            on_done(n, len(segments))
 
     with ThreadPoolExecutor(max_workers=max_workers or _FFMPEG_WORKERS) as pool:
-        list(pool.map(_one, segments))
+        list(pool.map(_tracked, segments))
     return dst_dir
 
 
@@ -281,6 +394,56 @@ def _duck_envelope(n: int, b0: int, rate: int,
         seg_env = 1.0 + frac * (duck_gain - 1.0)
         env[i_lo:i_hi] = np.minimum(env[i_lo:i_hi], seg_env)
     return env
+
+
+def _decode_resampled(path: str, rate: int, ch: int):
+    """Decode một clip WAV về mảng int32 (n, ch) ở đúng rate/kênh của mix.
+
+    Dùng ffmpeg (bộ resample swr, chất lượng cao) thay cho
+    ``pydub.set_frame_rate`` (nội suy tuyến tính audioop — sinh méo/aliasing
+    khi kéo 24 kHz lên 44.1 kHz). Xuất s16le thẳng ra stdout — không file
+    tạm. ffmpeg lỗi thì rơi về pydub để không câm mất clip.
+    """
+    import numpy as np
+
+    try:
+        result = subprocess.run(
+            ["ffmpeg", "-v", "error", "-i", path,
+             "-f", "s16le", "-ar", str(rate), "-ac", str(ch), "-"],
+            capture_output=True, timeout=_SEG_TIMEOUT_S,
+        )
+        if result.returncode == 0 and result.stdout:
+            return (np.frombuffer(result.stdout, dtype=np.int16)
+                    .astype(np.int32).reshape(-1, ch))
+    except (subprocess.TimeoutExpired, OSError):
+        pass
+    logger.warning(f"ffmpeg decode lỗi trên {os.path.basename(path)} — "
+                   "dùng pydub")
+    seg_audio = (AudioSegment.from_wav(path)
+                 .set_frame_rate(rate).set_channels(ch).set_sample_width(2))
+    return np.array(seg_audio.get_array_of_samples(),
+                    dtype=np.int32).reshape(-1, ch)
+
+
+def _soft_limit(block):
+    """Hạn biên mềm thay cho cắt cứng khi giọng + nhạc nền vượt trần int16.
+
+    Dưới ngưỡng ~ -1 dBFS giữ nguyên từng mẫu (đa số block đi qua nguyên
+    vẹn, byte-identical); phần vượt ngưỡng được nén dần bằng tanh về trần
+    32767 — đỉnh to mấy cũng không gãy sóng vuông thành tiếng rè như
+    ``np.clip`` thuần.
+    """
+    import numpy as np
+
+    T, M = 29000.0, 32767.0
+    over = (block > T) | (block < -T)
+    if not over.any():
+        return block
+    v = block[over].astype(np.float32)
+    mag = np.abs(v)
+    block[over] = (np.sign(v) * (T + (M - T) * np.tanh(
+        (mag - T) / (M - T)))).astype(np.int32)
+    return block
 
 
 def merge_segments(
@@ -410,11 +573,7 @@ def merge_segments(
                 cached = seg_cache.get(sid)
                 if cached is None:
                     seg_file = seg_wav_path(segment_dir, seg["id"])
-                    seg_audio = (AudioSegment.from_wav(seg_file)
-                                 .set_frame_rate(rate).set_channels(ch)
-                                 .set_sample_width(2))
-                    arr = np.array(seg_audio.get_array_of_samples(),
-                                   dtype=np.int32).reshape(-1, ch)
+                    arr = _decode_resampled(seg_file, rate, ch)
                     seg_cache[sid] = (arr, seg_end)
                 else:
                     arr = cached[0]
@@ -426,7 +585,8 @@ def merge_segments(
                 block[gs - b0:ge - b0] += arr[gs - start_f:ge - start_f]
 
             out.writeframes(
-                np.clip(block, -32768, 32767).astype(np.int16).tobytes())
+                np.clip(_soft_limit(block), -32768, 32767)
+                .astype(np.int16).tobytes())
     finally:
         out.close()
         if bg_wave is not None:

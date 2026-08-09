@@ -8,7 +8,7 @@ from __future__ import annotations
 import logging
 import time
 
-from PySide6.QtCore import Qt, QSize
+from PySide6.QtCore import Qt, QSize, QTimer
 from PySide6.QtGui import QColor, QPainter, QTextCursor
 from PySide6.QtWidgets import (
     QFrame, QGridLayout, QHBoxLayout, QLabel, QPlainTextEdit, QProgressBar,
@@ -131,14 +131,30 @@ class StepTracker(QWidget):
         return f"{h} giờ {m} phút"
 
     def reset(self) -> None:
-        for dot, name, status in self._rows.values():
+        for step, (dot, name, status) in self._rows.items():
             dot.set_state("idle")
             name.setStyleSheet(f"color: {theme.TEXT_DIM};")
             status.setText("")
             status.setStyleSheet(f"color: {theme.TEXT_DIM}; font-size: 12px;")
+            self._set_row_visible(step, True)
         self._bar.setVisible(False)
         self._bar.setValue(0)
         self._t0.clear()
+
+    def _set_row_visible(self, step: str, visible: bool) -> None:
+        for w in self._rows[step]:
+            w.setVisible(visible)
+
+    def show_only(self, steps) -> None:
+        """Chỉ hiện các bước trong ``steps``, ẩn hẳn phần còn lại.
+
+        Dùng cho pha Xuất video: lần chạy đó chỉ làm ghép video và viết mô tả,
+        nên bày lại cả 7 bước đã xong ở trạng thái xám khiến người dùng tưởng
+        phải làm lại từ đầu.
+        """
+        keep = set(steps)
+        for step in self._rows:
+            self._set_row_visible(step, step in keep)
 
     def apply_event(self, ev: ProgressEvent) -> None:
         if ev.step == "done":
@@ -179,9 +195,19 @@ class StepTracker(QWidget):
 
 
 class LogPanel(QPlainTextEdit):
-    """Read-only log output with level colouring."""
+    """Khung Nhật ký chỉ đọc: tô màu theo mức, ghi đè tại chỗ dòng tiến trình.
 
-    MAX_BLOCKS = 2000
+    Có ba mức hiển thị ngoài các mức logging chuẩn:
+    - ``logging.INFO`` (20) — màu TEXT_MUTED (mặc định)
+    - ``logging.WARNING`` (30) — màu WARNING
+    - ``logging.ERROR`` (40) — màu ERROR
+    - ``log_text.SUCCESS`` (25) — màu SUCCESS (dùng cho dòng "đã xong")
+
+    Dòng "tiến trình" (``is_progress=True``) ghi đè dòng trước nếu dòng trước
+    cũng là tiến trình — video nghìn câu không làm ngập Nhật ký.
+    """
+
+    MAX_BLOCKS = 600
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -192,20 +218,114 @@ class LogPanel(QPlainTextEdit):
         self.setStyleSheet(
             f"QPlainTextEdit {{ background: {tokens.LOG_BG}; "
             f"color: {theme.TEXT_MUTED}; "
-            f"font-family: Consolas, monospace; font-size: 12px; "
-            f"border: 1px solid {theme.BORDER}; }}")
+            f"font-family: 'Segoe UI', sans-serif; font-size: 13px; "
+            f"border: 1px solid {theme.BORDER}; padding: 4px 8px; }}")
+        self._last_is_progress = False
 
-    def append_log(self, message: str, levelno: int) -> None:
+    def _color_for(self, levelno: int) -> str:
+        from autodub_gui.log_text import SUCCESS
         if levelno >= logging.ERROR:
-            color = theme.ERROR
-        elif levelno >= logging.WARNING:
-            color = theme.WARNING
-        else:
-            color = theme.TEXT_MUTED
+            return theme.ERROR
+        if levelno >= logging.WARNING:
+            return theme.WARNING
+        if levelno == SUCCESS:
+            return theme.SUCCESS
+        return theme.TEXT_MUTED
+
+    def append_log(self, message: str, levelno: int,
+                   is_progress: bool = False) -> None:
+        """Thêm một dòng mới vào Nhật ký.
+
+        ``is_progress=True``: ghi đè dòng cuối nếu nó cũng là dòng tiến trình,
+        thay vì chèn thêm — tránh làm ngập panel khi số câu lớn.
+        """
+        color = self._color_for(levelno)
         escaped = (message.replace("&", "&amp;").replace("<", "&lt;")
                    .replace(">", "&gt;"))
-        self.appendHtml(f'<span style="color:{color};">{escaped}</span>')
+        html = f'<span style="color:{color};">{escaped}</span>'
+
+        if is_progress and self._last_is_progress:
+            # Xoá dòng cuối, thay bằng dòng mới.
+            cursor = self.textCursor()
+            cursor.movePosition(QTextCursor.End)
+            cursor.select(QTextCursor.BlockUnderCursor)
+            cursor.removeSelectedText()
+            # removeSelectedText có thể để lại dòng trống — xoá nốt nếu cần.
+            cursor.movePosition(QTextCursor.End)
+            if cursor.block().text().strip():
+                # vẫn còn chữ: thêm dòng mới trước khi viết
+                self.appendHtml(html)
+            else:
+                cursor.insertHtml(html)
+        else:
+            self.appendHtml(html)
+
+        self._last_is_progress = is_progress
         self.moveCursor(QTextCursor.End)
+
+    def reset_log(self) -> None:
+        """Xoá toàn bộ nhật ký và reset cờ tiến trình."""
+        self.clear()
+        self._last_is_progress = False
+
+
+class RunStatsPanel(QFrame):
+    """Dải số liệu của lần chạy: số câu thoại và Vox tạm tính.
+
+    Số câu lấy từ sự kiện ``asr done`` (detail "N segments"); Vox tích lũy
+    đọc từ ``USAGE`` mỗi giây trong lúc dịch — đúng con số máy chủ báo về
+    sau từng lô, nên khớp với thẻ tổng kết ở bước Xuất video.
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName("runstats")
+        self.setStyleSheet(
+            f"QFrame#runstats {{ background: {theme.BG_PANEL}; "
+            f"border: 1px solid {theme.BORDER}; border-radius: 3px; }}")
+        row = QHBoxLayout(self)
+        row.setContentsMargins(12, 8, 12, 8)
+        row.setSpacing(18)
+        self._sentences = QLabel("")
+        self._vox = QLabel("")
+        for label in (self._sentences, self._vox):
+            label.setStyleSheet(f"color: {theme.TEXT}; font-size: 13px;")
+            row.addWidget(label)
+        row.addStretch()
+
+        self._timer = QTimer(self)
+        self._timer.setInterval(1000)
+        self._timer.timeout.connect(self._poll)
+
+    def reset(self) -> None:
+        self._timer.stop()
+        self._sentences.setText("")
+        self._vox.setText("")
+
+    def apply_event(self, ev: ProgressEvent) -> None:
+        if ev.step == "asr" and ev.status in ("done", "skip"):
+            # detail có dạng "123 segments" hoặc "123 segments (cached)"
+            head = str(ev.detail or "").split(" ", 1)[0]
+            if head.isdigit():
+                self._sentences.setText(f"Số câu thoại: {int(head):,}")
+        elif ev.step == "translate" and ev.status in ("start", "progress"):
+            if not self._timer.isActive():
+                self._poll()
+                self._timer.start()
+        elif ev.step == "done" or ev.status == "error":
+            self._timer.stop()
+            self._poll()
+
+    def _poll(self) -> None:
+        from autodub.text.translate_common import USAGE
+
+        vox = USAGE.snapshot()["vox"]
+        if vox:
+            self._vox.setText(f"Vox tạm tính: {vox:,}")
+
+    def hideEvent(self, event) -> None:  # noqa: N802 — Qt API
+        self._timer.stop()
+        super().hideEvent(event)
 
 
 class Banner(QFrame):

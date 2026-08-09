@@ -28,7 +28,7 @@ from autodub_gui.pages.editor_commands import (
 )
 from autodub_gui.pages.editor_panels import (
     AudioPanel, BackgroundPanel, DirtyBanner, ExportPanel, OverviewPanel,
-    SubtitleListPanel, VoicePanel, debounce_timer,
+    QCPanel, SubtitleListPanel, VoicePanel, debounce_timer,
 )
 from autodub_gui.run_state import REGISTRY, ActiveJob
 from autodub_gui.system_open import open_file, open_folder
@@ -41,6 +41,7 @@ from autodub_gui.video.player import VideoPlayer
 from autodub_gui.video.timeline import Timeline
 from autodub_gui.voice_preview import VoicePreview
 from autodub_gui.widgets import LogPanel
+from autodub_gui.log_text import Narrator
 
 TOP_BAR_H = 56
 # Đủ rộng cho nhãn dài nhất («Xuất video») cộng biểu tượng, lề và đệm của
@@ -56,6 +57,7 @@ _RAIL_ICON = 20
 RAIL_ITEMS = (
     ("overview", "Tổng quan", icons.home),
     ("subtitles", "Phụ đề", icons.edit),
+    ("qc", "Kiểm tra", icons.check),
     ("audio", "Âm thanh", icons.waveform),
     ("voice", "Giọng đọc", icons.mic),
     ("background", "Nhạc nền", icons.layers),
@@ -84,11 +86,18 @@ class EditorPage(VoiceAndExportMixin, BasePage):
         self._undo = QUndoStack(self)
         self._undo.setUndoLimit(_UNDO_LIMIT)
         self._preview = VoicePreview(self)
+        self._narrator = Narrator()
         self._save_worker = None
         self._resynth_worker = None
         self._rebuild_worker = None
+        self._preview_seg_worker = None
         self._wave_worker = None
+        self._wave_workers: list = []
         self._edit_worker = None
+        self._thumb_worker = None
+        self._export_subs_file_worker = None
+        self._export_audio_worker = None
+        self._selection_end: float | None = None  # mốc dừng khi phát vùng chọn
         self._build()
         self._save_timer = debounce_timer(self, self._flush_edits)
         from autodub_gui.shortcuts import install_editor_shortcuts
@@ -120,7 +129,7 @@ class EditorPage(VoiceAndExportMixin, BasePage):
         row.setSpacing(tokens.SP_3)
 
         logo = QLabel()
-        logo.setPixmap(icons.brand_logo(24))
+        logo.setPixmap(icons.app_logo(24))
         clear_background(logo)
         caption = QLabel("Chỉnh sửa dự án")
         caption.setStyleSheet(
@@ -155,7 +164,7 @@ class EditorPage(VoiceAndExportMixin, BasePage):
             f"border: none; border-right: 1px solid {tokens.BORDER_SUBTLE}; }}")
         for _key, label, icon_fn in RAIL_ITEMS:
             item = QListWidgetItem(label)
-            item.setIcon(icon_fn(tokens.TEXT_SECONDARY))
+            item.setIcon(icons.nav_icon(icon_fn))
             item.setToolTip(label)
             item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             self.rail.addItem(item)
@@ -187,6 +196,7 @@ class EditorPage(VoiceAndExportMixin, BasePage):
         self.timeline.segment_clicked.connect(self._on_timeline_click)
         self.timeline.segment_moved.connect(self._on_segment_moved)
         self.timeline.split_requested.connect(self._on_split_at)
+        self.timeline.selection_play_requested.connect(self._play_selection)
         layout.addWidget(self.timeline)
 
         self.log = LogPanel()
@@ -207,6 +217,8 @@ class EditorPage(VoiceAndExportMixin, BasePage):
         self.overview.open_subtitle.connect(self._open_subtitle)
         self.overview.open_youtube.connect(self._open_youtube)
         self.overview.open_other.connect(self._open_other_folder)
+        self.overview.issue_clicked.connect(self._jump_to_issue)
+        self.overview.context_saved.connect(self._save_context)
 
         self.subtitles = SubtitleListPanel()
         self.subtitles.text_edited.connect(self._on_text_edited)
@@ -217,7 +229,11 @@ class EditorPage(VoiceAndExportMixin, BasePage):
         self.subtitles.split_requested.connect(self._split_at_playhead)
         self.subtitles.merge_requested.connect(self._merge_with_next)
         self.subtitles.delete_requested.connect(self._delete_segment)
+        self.subtitles.voice_changed.connect(self._on_segment_voice_changed)
         self.subtitles.add_requested.connect(self._add_segment)
+
+        self.qc_panel = QCPanel()
+        self.qc_panel.issue_clicked.connect(self._jump_to_issue)
 
         self.audio_panel = AudioPanel()
         self.audio_panel.changed.connect(self._save_render_opts)
@@ -231,6 +247,10 @@ class EditorPage(VoiceAndExportMixin, BasePage):
         self.export_panel.export_requested.connect(self._export)
         self.export_panel.subtitles_requested.connect(self._export_subtitles)
         self.export_panel.style_requested.connect(self._open_style_dialog)
+        self.export_panel.preview_requested.connect(self._preview_segment)
+        self.export_panel.export_srt_requested.connect(self._export_srt_file)
+        self.export_panel.export_ass_requested.connect(self._export_ass_file)
+        self.export_panel.export_audio_mp3_requested.connect(self._export_audio_mp3)
         self.export_panel.changed.connect(self._on_export_options_changed)
         self._preview.status_changed.connect(self.voice_panel.status.setText)
         # Khoá nút khi đang tổng hợp / phát, mở lại khi xong — giống hành vi
@@ -239,9 +259,9 @@ class EditorPage(VoiceAndExportMixin, BasePage):
         self._preview.finished.connect(
             lambda _ok: self.voice_panel.picker.set_preview_enabled(True))
 
-        for widget in (self.overview, self.subtitles, self.audio_panel,
-                       self.voice_panel, self.background_panel,
-                       self.export_panel):
+        for widget in (self.overview, self.subtitles, self.qc_panel,
+                       self.audio_panel, self.voice_panel,
+                       self.background_panel, self.export_panel):
             self.panels.addWidget(self._scrollable(widget))
         layout.addWidget(self.panels)
         # Mở sẵn mục Phụ đề vì đó là chỗ người dùng làm việc nhiều nhất.
@@ -325,8 +345,11 @@ class EditorPage(VoiceAndExportMixin, BasePage):
         self.timeline.set_segments(self._segments)
         self.overview.set_project(self._project, len(self._segments),
                                   self._read_quality())
+        self.overview.set_context(self._read_context())
         self._load_render_opts()
         self.banner.set_count(0, 0)
+        self._refresh_qc()
+        self.export_panel.refresh_history(self._work_dir)
         self.save_indicator.set_state("idle")
         self._load_video()
         self._load_waveform()
@@ -342,17 +365,68 @@ class EditorPage(VoiceAndExportMixin, BasePage):
         except (OSError, ValueError):
             return {}
 
+    def _read_context(self) -> dict:
+        from autodub.workdir import data_path
+        import json
+
+        try:
+            with open(data_path(self._work_dir, "video_context.json"),
+                      encoding="utf-8") as f:
+                data = json.load(f)
+            return data if isinstance(data, dict) else {}
+        except (OSError, ValueError):
+            return {}
+
+    def _save_context(self, context: dict) -> None:
+        """Lưu ngữ cảnh dịch người dùng vừa sửa vào video_context.json."""
+        if not self._work_dir:
+            return
+        from autodub.utils import save_json_atomic
+        from autodub.workdir import data_path
+
+        try:
+            save_json_atomic(context,
+                             data_path(self._work_dir, "video_context.json"))
+            TOASTS.info("Đã lưu ngữ cảnh dịch của video này.")
+        except OSError as e:
+            TOASTS.warn(f"Không lưu được ngữ cảnh: {e}")
+
     def _load_video(self) -> None:
         target = (self._project.output_path or self._state.video_path or "")
         if target and self.player.open(target):
             self.player.set_segments(self._segments,
                                      self._state.target.text_field)
             self._sync_overlay(target)
-            self.timeline.set_duration(self._project.duration_s
-                                       or self.player.duration())
+            dur = self._project.duration_s or self.player.duration()
+            self.timeline.set_duration(dur)
             self.player.duration_changed.connect(self.timeline.set_duration)
+            self._start_thumb_worker(target, dur)
         else:
             self.timeline.set_duration(self._project.duration_s)
+
+    def _start_thumb_worker(self, video_path: str, duration_s: float) -> None:
+        """Khởi động worker grab thumbnail nền; hủy lần trước nếu còn chạy."""
+        from autodub_gui.workers import TimelineThumbnailWorker
+
+        if self._thumb_worker is not None:
+            try:
+                self._thumb_worker.ready.disconnect()
+            except RuntimeError:
+                pass
+            # quit() vô nghĩa với QThread ghi đè run() (không có event loop) —
+            # thread cũ vẫn chạy ffmpeg và có thể bắn tín hiệu cũ về sau.
+            # cancel() + wait() mới thật sự dừng nó.
+            self._thumb_worker.cancel()
+            self._thumb_worker.wait(2000)
+            self._thumb_worker = None
+        if not video_path or duration_s <= 0:
+            return
+        worker = TimelineThumbnailWorker(
+            video_path, duration_s, self._work_dir, parent=self)
+        worker.ready.connect(self.timeline.set_thumbnails)
+        worker.finished.connect(worker.deleteLater)
+        self._thumb_worker = worker
+        worker.start()
 
     def _sync_overlay(self, opened_path: str) -> None:
         """Một video chỉ được có MỘT lớp phụ đề.
@@ -373,17 +447,35 @@ class EditorPage(VoiceAndExportMixin, BasePage):
         self.player.set_overlay_enabled(not burned)
 
     def _load_waveform(self) -> None:
+        """Nạp dạng sóng cho từng track có mặt; thiếu hết thì về 1 dải cũ."""
+        import functools
+
         from autodub_gui.workers import WaveformWorker
 
-        path = waveform.source_for(self._work_dir)
-        if not path:
-            self.timeline.set_peaks([])
+        sources = waveform.track_sources(self._work_dir)
+        self._wave_workers = []
+        for kind in ("original", "voice", "music"):
+            self.timeline.set_track_available(kind, kind in sources)
+        if not sources:
+            path = waveform.source_for(self._work_dir)
+            if not path:
+                self.timeline.set_peaks([])
+                return
+            self.timeline.set_loading(True)
+            worker = WaveformWorker(path, parent=self)
+            worker.ready.connect(self.timeline.set_peaks)
+            self._wave_worker = worker
+            worker.start()
             return
         self.timeline.set_loading(True)
-        worker = WaveformWorker(path, parent=self)
-        worker.ready.connect(self.timeline.set_peaks)
-        self._wave_worker = worker
-        worker.start()
+        for kind, path in sources.items():
+            worker = WaveformWorker(
+                path, parent=self,
+                cache_name=waveform.cache_name_for(path))
+            worker.ready.connect(
+                functools.partial(self.timeline.set_track_peaks, kind))
+            self._wave_workers.append(worker)
+            worker.start()
 
     def _load_render_opts(self) -> None:
         from autodub.editor import load_render_opts
@@ -450,7 +542,15 @@ class EditorPage(VoiceAndExportMixin, BasePage):
         preset = self.export_panel.preset.current_key()
         current = getattr(self, "_subtitle_style", None) or {}
         if preset and preset != current.get("preset"):
-            self._subtitle_style = preset_style(preset)
+            # Trùng với bộ trong Cài đặt thì lấy đủ tinh chỉnh từ đó — cùng
+            # logic với lúc tạo dự án, để hai nơi ra cùng một chữ trên video.
+            try:
+                settings = self._settings_provider()
+                self._subtitle_style = (settings.subtitle_style()
+                                        if preset == settings.subtitle_preset
+                                        else preset_style(preset))
+            except Exception:  # noqa: BLE001 — cấu hình hỏng thì dùng bộ sẵn
+                self._subtitle_style = preset_style(preset)
         self._save_render_opts()
         self._apply_style_to_player()
 
@@ -536,6 +636,15 @@ class EditorPage(VoiceAndExportMixin, BasePage):
         voice = len(self._dirty_ids) or (
             1 if getattr(self, "_structural_edit", False) else 0)
         self.banner.set_count(voice, len(self._sub_dirty_ids))
+        self._refresh_qc()
+
+    def _refresh_qc(self) -> None:
+        """Cập nhật bảng Kiểm tra theo trạng thái hiện tại của dự án."""
+        if not self._work_dir or self._state is None:
+            return
+        self.qc_panel.refresh(self._segments, self._read_quality(),
+                              self._dirty_ids,
+                              self._state.target.text_field)
 
     def has_unsaved_changes(self) -> bool:
         return bool(self._pending_edits or self._pending_subs)
@@ -543,6 +652,10 @@ class EditorPage(VoiceAndExportMixin, BasePage):
     # -- Đồng bộ với video và dải thời gian -----------------------------
     def _on_position(self, seconds: float) -> None:
         self.timeline.set_position(seconds)
+        # Đang phát vùng chọn → tự dừng khi chạy hết vùng
+        if self._selection_end is not None and seconds >= self._selection_end:
+            self._selection_end = None
+            self.player.pause()
         segment = self.player.current_segment()
         if segment is not None:
             self.subtitles.highlight(int(segment.get("id", -1)))
@@ -552,6 +665,12 @@ class EditorPage(VoiceAndExportMixin, BasePage):
         segment = self._segment(seg_id)
         if segment is not None:
             self.player.seek(float(segment.get("start", 0.0)))
+
+    def _jump_to_issue(self, seg_id: int) -> None:
+        """Bấm một dòng trong báo cáo chất lượng — nhảy tới đúng câu đó."""
+        self._show_tab("subtitles")
+        self.subtitles.highlight(seg_id)
+        self._on_segment_selected(seg_id)
 
     def _on_timeline_click(self, seg_id: int) -> None:
         self.timeline.set_selected(seg_id)
@@ -574,6 +693,45 @@ class EditorPage(VoiceAndExportMixin, BasePage):
         if segment is not None:
             self.player.seek(float(segment.get("start", 0.0)))
             self.player.play()
+
+    def _play_selection(self, start: float, end: float) -> None:
+        """Phát vùng thời gian đã chọn trên thước; tự dừng ở cuối vùng."""
+        self._selection_end = end
+        self.player.seek(start)
+        self.player.play()
+
+    def _on_segment_voice_changed(self, seg_id: int, voice: str) -> None:
+        """Gán (hoặc bỏ) giọng riêng cho một câu và đánh dấu cần đọc lại."""
+        from autodub.editor import set_segment_voice
+
+        if not self._work_dir:
+            return
+        try:
+            changed = set_segment_voice(
+                self._work_dir, seg_id, voice,
+                self.target_key())
+        except Exception as e:  # noqa: BLE001
+            from autodub_gui.ui.toast import TOASTS
+            TOASTS.warn(f"Không lưu được giọng riêng: {e}")
+            return
+        if changed:
+            # Cập nhật bản sao trong bộ nhớ để các thao tác tiếp theo nhất quán.
+            seg = self._segment(seg_id)
+            if seg is not None:
+                if voice:
+                    seg["voice"] = voice
+                else:
+                    seg.pop("voice", None)
+            # Câu này cần đọc lại giọng để ra đúng voice mới.
+            self._dirty_ids.add(seg_id)
+            self._refresh_banner()
+            from autodub_gui.ui.toast import TOASTS
+            if voice:
+                TOASTS.info(f"Câu {seg_id}: đọc bằng giọng «{voice}». "
+                            "Bấm «Đọc lại câu này» để áp dụng.")
+            else:
+                TOASTS.info(f"Câu {seg_id}: đã bỏ giọng riêng, "
+                            "quay về giọng chung của dự án.")
 
     def _add_segment(self) -> None:
         """Chèn một câu mới ngay sau câu đang chọn."""
@@ -738,17 +896,34 @@ class EditorPage(VoiceAndExportMixin, BasePage):
 
     def is_running(self) -> bool:
         return any(w is not None and w.isRunning()
-                   for w in (self._resynth_worker, self._rebuild_worker))
+                   for w in (self._resynth_worker, self._rebuild_worker,
+                             self._preview_seg_worker,
+                             self._export_subs_file_worker,
+                             self._export_audio_worker))
 
     def shutdown(self) -> None:
-        for worker in (self._resynth_worker, self._rebuild_worker):
+        for worker in (self._resynth_worker, self._rebuild_worker,
+                       self._preview_seg_worker,
+                       self._export_subs_file_worker,
+                       self._export_audio_worker):
             if worker is not None and worker.isRunning():
                 worker.cancel()
                 worker.wait(5000)
+        # Worker thumbnail chỉ chạy ffmpeg ngắn — hủy rồi chờ nhanh.
+        if self._thumb_worker is not None and self._thumb_worker.isRunning():
+            self._thumb_worker.cancel()
+            self._thumb_worker.wait(2000)
 
     def cleanup(self) -> None:
+        # app.quit() có thể bỏ qua closeEvent → shutdown() chưa chắc đã chạy.
+        # Gọi lại ở đây (idempotent) để không QThread nào bị hủy khi còn chạy
+        # (0xC0000409 trên Windows).
+        self.shutdown()
         self.save_now()
         self.player.cleanup()
         self._preview.cleanup()
         if self._wave_worker is not None and self._wave_worker.isRunning():
             self._wave_worker.wait(2000)
+        for worker in self._wave_workers:
+            if worker.isRunning():
+                worker.wait(2000)

@@ -5,9 +5,28 @@ from urllib.parse import urlparse, parse_qs
 
 import yt_dlp
 
-from autodub.utils import setup_logging, ensure_dir
+from autodub.utils import setup_logging, ensure_dir, save_json_atomic
 
 logger = setup_logging("autodub.downloader")
+
+
+def _save_meta(output_dir: str, title: str, uploader: str = "") -> None:
+    """Lưu title/uploader vào ``data/video_meta.json`` cạnh video tải về.
+
+    Title là ngữ cảnh miễn phí, giá trị cao cho bước phân tích/dịch/metadata —
+    trước đây bị vứt đi ngay sau khi tải. Best-effort: lỗi ghi không được
+    làm hỏng lượt tải.
+    """
+    title = (title or "").strip()
+    if not title:
+        return
+    try:
+        from autodub.workdir import data_path
+        save_json_atomic({"title": title, "uploader": (uploader or "").strip()},
+                         data_path(output_dir, "video_meta.json",
+                                   create_dir=True))
+    except OSError as e:
+        logger.warning(f"Không lưu được video_meta.json: {e}")
 
 
 def normalize_url(url: str) -> str:
@@ -45,6 +64,7 @@ def download_video(url: str, output_dir: str) -> str:
     if is_douyin_url(url):
         logger.info(f"Routing to Playwright Douyin extractor: {url}")
         info = download_douyin(url, output_dir)
+        _save_meta(output_dir, info.get("title", ""), info.get("uploader", ""))
         return info["filepath"]
 
     canonical = normalize_url(url)
@@ -81,6 +101,7 @@ def download_video(url: str, output_dir: str) -> str:
     if not os.path.exists(filepath):
         raise RuntimeError(f"Download failed: file not found at {filepath}")
 
+    _save_meta(output_dir, info.get("title", ""), info.get("uploader", ""))
     logger.info(f"Downloaded: {filepath}")
     return filepath
 

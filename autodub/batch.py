@@ -17,6 +17,8 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
+import threading
 from dataclasses import dataclass
 from typing import Callable, Iterable
 
@@ -72,6 +74,97 @@ class BatchSummary:
 BatchObserver = Callable[[int, int, BatchItem, str, str], None]
 
 
+class _Prefetcher:
+    """Tải trước video KẾ TIẾP trong khi video hiện tại đang xử lý.
+
+    Tải mạng hoàn toàn độc lập với các bước GPU/CPU của video đang chạy —
+    chồng lấn hai việc là thời gian tải gần như miễn phí. Mỗi lúc chỉ tải
+    trước một video (không tải cả danh sách: tốn đĩa và băng thông vô ích
+    khi người dùng hủy giữa chừng).
+
+    File tải trước nằm ở ``<output_dir>/_prefetch/<n>/``; khi video chạy
+    xong thành công, file được dọn vào work_dir của chính video đó (resume
+    tự tìm thấy như video tải bình thường).
+    """
+
+    def __init__(self, root_dir: str):
+        self._root = os.path.join(root_dir, "_prefetch")
+        self._thread: threading.Thread | None = None
+        self._result: dict = {}
+
+    def start(self, index: int, item: BatchItem) -> None:
+        """Bắt đầu tải nền cho ``item`` (bỏ qua nếu là file local)."""
+        self._thread = None
+        self._result = {}
+        if not item.url or item.file_path:
+            return
+        dest = os.path.join(self._root, str(index))
+        result = self._result
+
+        def _work():
+            try:
+                from autodub.media.downloader import download_video
+                result["path"] = download_video(item.url, dest)
+            except Exception as e:  # noqa: BLE001 — video này sẽ tải lại bình thường
+                logger.warning(f"Tải trước thất bại ({item.label}): {e}")
+                result["error"] = str(e)
+
+        logger.info(f"Tải trước video kế tiếp: {item.label}")
+        t = threading.Thread(target=_work, daemon=True,
+                             name="batch-prefetch")
+        t.start()
+        self._thread = t
+
+    def take(self, timeout: float = 3600.0) -> str | None:
+        """Chờ lượt tải nền xong; trả về đường dẫn file hoặc None."""
+        t, self._thread = self._thread, None
+        if t is None:
+            return None
+        t.join(timeout)
+        if t.is_alive():
+            logger.warning("Tải trước quá lâu — video sẽ tự tải lại")
+            return None
+        return self._result.get("path")
+
+    @staticmethod
+    def adopt(prefetched: str, work_dir: str) -> None:
+        """Dọn file đã tải trước vào work_dir của video (best-effort)."""
+        try:
+            if os.path.isfile(prefetched) and os.path.isdir(work_dir):
+                target = os.path.join(work_dir,
+                                      os.path.basename(prefetched))
+                if not os.path.exists(target):
+                    shutil.move(prefetched, target)
+                parent = os.path.dirname(prefetched)
+                # video_meta.json (title) đi kèm video — dọn vào data/ của
+                # work_dir để các bước dịch/metadata đọc được.
+                meta = os.path.join(parent, "data", "video_meta.json")
+                if os.path.isfile(meta):
+                    from autodub.workdir import data_path
+                    meta_target = data_path(work_dir, "video_meta.json",
+                                            create_dir=True)
+                    if not os.path.exists(meta_target):
+                        shutil.move(meta, meta_target)
+                    else:
+                        os.remove(meta)  # _resolve_video đã chép sẵn
+                    meta_dir = os.path.dirname(meta)
+                    if os.path.isdir(meta_dir) and not os.listdir(meta_dir):
+                        os.rmdir(meta_dir)
+                if os.path.isdir(parent) and not os.listdir(parent):
+                    os.rmdir(parent)
+        except OSError as e:
+            logger.warning(f"Không dọn được file tải trước: {e}")
+
+    def cleanup(self) -> None:
+        """Xoá các file tải trước còn sót (video lỗi giữ nguyên để resume)."""
+        self._thread = None
+        try:
+            if os.path.isdir(self._root) and not os.listdir(self._root):
+                os.rmdir(self._root)
+        except OSError:
+            pass
+
+
 def parse_lines(text: str | Iterable[str]) -> list[BatchItem]:
     """Turn pasted text (or a list of lines) into batch items.
 
@@ -117,6 +210,12 @@ def _run_items(
     per-item events — used by the GUI. A :class:`PipelineCancelled` from the
     pipeline aborts the whole batch (it is not recorded as a failure)."""
     summary = BatchSummary(total=len(items))
+    # req_template.output_dir có thể None — dùng default của pipeline để
+    # thư mục _prefetch nằm cạnh các work_dir.
+    from autodub.languages import get_target
+    prefetch_root = (req_template.output_dir
+                     or pipeline.default_output_dir(get_target(req_template.target)))
+    prefetcher = _Prefetcher(prefetch_root)
 
     for i, item in enumerate(items):
         logger.info(f"[{i + 1}/{len(items)}] Processing: {item.label}")
@@ -124,10 +223,23 @@ def _run_items(
             on_start(item)
         if observer:
             observer(i, len(items), item, "start", "")
+        # Video này đã được tải trước trong lúc video trước xử lý?
+        prefetched = prefetcher.take()
+        # Bắt đầu tải nền video KẾ TIẾP ngay khi video này khởi động.
+        if i + 1 < len(items):
+            prefetcher.start(i + 1, items[i + 1])
         try:
+            # Video này từng chạy dở (lỗi, thiếu Vox…)? Chạy TIẾP đúng thư
+            # mục cũ: phần đã tải/nghe-chép/dịch được dùng lại, không tạo
+            # thư mục mới — job_id giữ nguyên nên không bị trừ Vox lần nữa.
+            resume_dir = None
+            if isinstance(item.ref, dict):
+                prev_dir = item.ref.get("work_dir") or ""
+                if prev_dir and os.path.isdir(prev_dir):
+                    resume_dir = prev_dir
             result = pipeline.run(DubRequest(
                 url=item.url,
-                file_path=item.file_path,
+                file_path=prefetched or item.file_path,
                 source_lang=req_template.source_lang,
                 voice=item.voice or req_template.voice,
                 bg_mode=req_template.bg_mode,
@@ -141,29 +253,51 @@ def _run_items(
                               if item.blur_regions is not None
                               else req_template.blur_regions),
                 output_dir=req_template.output_dir,
-                translate_engine=req_template.translate_engine,
+                resume_dir=resume_dir,
             ))
             if result.status != "completed":
-                raise RuntimeError(
-                    f"Pipeline stopped: {result.status} (work_dir={result.work_dir}). "
-                    "Complete the translation and resume this video individually."
-                )
+                # Vietnamese-first: this string lands in the batch table and
+                # the user's log, not just the console.
+                reasons = {
+                    "translate_pending": (
+                        "Video chờ bản dịch tay — mở video này ở trang Tạo "
+                        "dự án để dịch rồi chạy tiếp."),
+                    "credit_blocked": (
+                        "Không đủ Vox cho video này — nạp thêm rồi chạy lại; "
+                        "phần đã nghe-chép được dùng lại, chưa bị trừ Vox."),
+                }
+                raise RuntimeError(reasons.get(
+                    result.status,
+                    f"Pipeline dừng ở trạng thái {result.status} "
+                    f"(work_dir={result.work_dir})."))
             summary.success += 1
             logger.info(f"[{i + 1}/{len(items)}] SUCCESS → {result.report['session_id']}")
+            if prefetched:
+                # Dọn file tải trước vào work_dir để resume tự tìm thấy.
+                _Prefetcher.adopt(prefetched, result.report.get("output_dir", ""))
             on_result(item, result.report, None)
             if observer:
                 observer(i, len(items), item, "success", result.report["session_id"])
         except PipelineCancelled:
             logger.info("Batch cancelled by user")
+            # Nhớ thư mục dở dang để lần chạy lại đi tiếp từ chỗ dừng.
+            if isinstance(item.ref, dict) and getattr(pipeline, "last_work_dir", ""):
+                item.ref["work_dir"] = pipeline.last_work_dir
+            prefetcher.cleanup()
             raise
         except Exception as e:
             summary.failed += 1
             error_msg = str(e)[:200]
             logger.error(f"[{i + 1}/{len(items)}] FAILED: {error_msg}")
+            # Ghi lại thư mục của lượt chạy hỏng — chạy lại sẽ resume đúng
+            # thư mục này thay vì tải + nghe-chép lại từ đầu.
+            if isinstance(item.ref, dict) and getattr(pipeline, "last_work_dir", ""):
+                item.ref["work_dir"] = pipeline.last_work_dir
             on_result(item, None, error_msg)
             if observer:
                 observer(i, len(items), item, "failed", error_msg)
 
+    prefetcher.cleanup()
     logger.info("=" * 60)
     logger.info("BATCH COMPLETE")
     logger.info(f"  Total:   {summary.total}")
@@ -294,6 +428,7 @@ def run_batch(
 
     synth_cache = None
     demucs_cache = None
+    whisper_cache = None
     if pipeline is None:
         if reuse_tts and len(pending) > 1:
             from autodub.speech.tts import SynthCache
@@ -304,16 +439,26 @@ def run_batch(
             # DemucsCache._ensure().
             from autodub.media.vocal_separator import DemucsCache
             demucs_cache = DemucsCache()
+            # Tương tự cho Whisper: gating (CPU luôn giữ, GPU cần đủ VRAM)
+            # nằm trong WhisperCache.get().
+            from autodub.speech.transcriber import WhisperCache
+            whisper_cache = WhisperCache()
         pipeline = DubPipeline(settings, synth_cache=synth_cache,
-                               demucs_cache=demucs_cache)
+                               demucs_cache=demucs_cache,
+                               whisper_cache=whisper_cache)
     try:
         summary = _run_items(pending, pipeline, req_template, on_result,
                              on_start=on_start, observer=observer)
     finally:
+        # Lưu lần cuối: bấm Dừng giữa chừng thì work_dir dở dang vừa được
+        # ghi vào item.ref cũng xuống đĩa, lần chạy lại mới resume được.
+        flush()
         if synth_cache is not None:
             synth_cache.close()
         if demucs_cache is not None:
             demucs_cache.close()
+        if whisper_cache is not None:
+            whisper_cache.close()
     summary.skipped = skipped
     return summary
 

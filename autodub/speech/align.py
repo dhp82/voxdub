@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import os
+from concurrent.futures import ThreadPoolExecutor
 
 from autodub.utils import save_json_atomic, seg_wav_path, setup_logging
 
@@ -33,17 +34,39 @@ ALIGN_MODEL = "base"
 _MIN_CLIP_S = 0.4
 
 
+def _align_workers() -> int:
+    """Số clip nghe song song. Base model nhỏ nên nghẽn là CPU, không phải RAM."""
+    return max(1, min(4, (os.cpu_count() or 4) // 2))
+
+
 def _load_align_model():
-    """Whisper base cho alignment — GPU nếu sẵn DLL, CPU cũng đủ nhanh."""
+    """Whisper base cho alignment. Trả ``(model, device, n_workers)``.
+
+    ``num_workers`` cho phép gọi ``transcribe`` từ nhiều luồng Python cùng lúc
+    (ctranslate2 giữ một bản trọng số, mỗi luồng một bộ đệm) — canh phụ đề là
+    hàng trăm clip ngắn độc lập nên đây là chỗ song song hóa gần như tuyến tính.
+    """
     from faster_whisper import WhisperModel
 
+    from autodub.resources import GPU_LOCK, cpu_share
     from autodub.speech.transcriber import _enable_cuda_dlls
     if _enable_cuda_dlls():
-        try:
-            return WhisperModel(ALIGN_MODEL, device="cuda", compute_type="int8")
-        except Exception as e:
-            logger.info(f"Alignment dùng CPU ({e})")
-    return WhisperModel(ALIGN_MODEL, device="cpu", compute_type="int8")
+        with GPU_LOCK:
+            # float16 là đường nhanh nhất của ctranslate2 trên GPU; int8 trên
+            # CUDA phải giải lượng tử liên tục nên chậm hơn.
+            for compute in ("float16", "int8_float16", "int8"):
+                try:
+                    model = WhisperModel(ALIGN_MODEL, device="cuda",
+                                         compute_type=compute)
+                    # GPU đã bị một model chiếm hết — thêm luồng chỉ tranh nhau.
+                    return model, "cuda", 1
+                except Exception as e:
+                    logger.debug(f"Alignment GPU {compute} không chạy ({e})")
+        logger.info("Alignment dùng CPU")
+    workers = _align_workers()
+    model = WhisperModel(ALIGN_MODEL, device="cpu", compute_type="int8",
+                         cpu_threads=cpu_share(workers), num_workers=workers)
+    return model, "cpu", workers
 
 
 def _asr_words(model, wav_path: str) -> list[tuple[str, float, float]]:
@@ -159,31 +182,46 @@ def align_segments(
     if not todo:
         return out
 
+    n_cached = len(out)
     logger.info(f"Đang canh phụ đề nhảy đúng nhịp giọng đọc "
-                f"({len(todo)} câu) — chờ chút...")
+                f"({len(todo)} câu"
+                + (f", {n_cached} câu dùng lại của lần trước" if n_cached else "")
+                + ") — chờ chút...")
     try:
-        model = _load_align_model()
+        model, _device, n_workers = _load_align_model()
     except Exception as e:
         logger.warning(f"Không canh được phụ đề theo giọng đọc ({e}) — "
                        "chữ sẽ chia đều theo thời lượng câu")
         return out
 
-    new_cache_entries: dict = {}
-    n_ok = 0
-    for seg, wav, dur, key in todo:
+    def _one(item):
+        seg, wav, dur, key = item
         sid = seg.get("id")
         text_words = str(seg.get(text_field, "")).split()
         try:
             asr = _asr_words(model, wav)
         except Exception as e:
             logger.debug(f"ASR alignment câu {sid} lỗi ({e}) — ước lượng")
-            continue
+            return None
         mapped = _map_words(text_words, asr, float(seg["start"]), dur)
         if mapped is None:
+            return None
+        return sid, key, float(seg["start"]), mapped
+
+    if n_workers > 1:
+        with ThreadPoolExecutor(max_workers=n_workers) as pool:
+            done = list(pool.map(_one, todo))
+    else:
+        done = [_one(item) for item in todo]
+
+    new_cache_entries: dict = {}
+    n_ok = 0
+    for res in done:
+        if res is None:
             continue
+        sid, key, base, mapped = res
         out[sid] = mapped
         n_ok += 1
-        base = float(seg["start"])
         new_cache_entries[key] = [
             [w, round(t0 - base, 3), round(t1 - base, 3)]
             for w, t0, t1 in mapped

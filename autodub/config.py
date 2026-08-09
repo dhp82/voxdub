@@ -33,19 +33,24 @@ def _auto_vieneu_workers() -> int:
     by_cpu = max(1, cores // 2)
 
     avail = available_ram_gb()
-    if avail is None:          # không đọc được RAM — giữ mặc định cũ
+    # ~1.5 GB/tiến trình, chừa ~3 GB cho giao diện + Demucs + hệ điều hành.
+    # Công thức này giữ nguyên số luồng của máy 6-10 GB như trước, nhưng máy
+    # khỏe (24-32 GB, nhiều nhân) không còn bị kẹp ở 3 nữa — TTS là bước lâu
+    # nhất nên trần thấp làm mất phần lớn hiệu năng sẵn có.
+    if avail is None:          # không đọc được RAM — giữ mặc định an toàn
         by_ram = 3
-    elif avail >= 10:
-        by_ram = 3
-    elif avail >= 6:
-        by_ram = 2
     else:
-        by_ram = 1
+        by_ram = max(1, int((avail - 3.0) // 1.5))
 
-    workers = min(3, by_ram, by_cpu)
-    if workers < 3:
+    workers = max(1, min(_VIENEU_WORKER_CEILING, by_ram, by_cpu))
+    if workers < _VIENEU_WORKER_CEILING:
         _log_governor_once(workers, avail, cores)
     return workers
+
+
+#: Trần cho số tiến trình giọng đọc tự tính. Trên mức này lợi ích giảm nhanh
+#: (tranh nhân CPU giữa các tiến trình ONNX) mà RAM vẫn tăng tuyến tính.
+_VIENEU_WORKER_CEILING = 6
 
 
 _governor_logged = False
@@ -65,6 +70,8 @@ def _log_governor_once(workers: int, avail: float | None, cores: int) -> None:
         f"Máy này ({ram_txt}, {cores} nhân) — chạy {workers} luồng giọng đọc "
         f"để không tràn bộ nhớ. Đặt VIENEU_MAX_WORKERS trong .env nếu muốn khác."
     )
+
+
 
 
 def _one_of(value: str, allowed: tuple[str, ...], default: str) -> str:
@@ -105,24 +112,6 @@ _PRESETS: dict[str, dict[str, str]] = {
     },
 }
 
-#: Các nơi dịch được hỗ trợ. "custom" cho phép trỏ tới máy chủ bất kỳ.
-TRANSLATE_ENGINES: tuple[str, ...] = (
-    "openrouter", "gemini", "openai", "anthropic", "deepseek", "custom",
-)
-
-#: Địa chỉ và mô hình mặc định của từng nơi dịch tương thích OpenAI.
-_PROVIDER_DEFAULTS: dict[str, tuple[str, str]] = {
-    "openrouter": ("https://openrouter.ai/api/v1/chat/completions",
-                   "google/gemini-2.5-flash"),
-    "openai": ("https://api.openai.com/v1/chat/completions", "gpt-4o-mini"),
-    "anthropic": ("https://api.anthropic.com/v1/chat/completions",
-                  "claude-haiku-4-5-20251001"),
-    "deepseek": ("https://api.deepseek.com/v1/chat/completions",
-                 "deepseek-chat"),
-    "custom": ("", ""),
-}
-
-
 @dataclass
 class Settings:
     # Mức chất lượng: một nút vặn đặt mặc định hợp lý cho các mục chi tiết
@@ -144,6 +133,12 @@ class Settings:
     # chất lượng. Máy CPU yếu có thể hạ (vd 1) để nhanh gấp 2–3 lần, đổi lại
     # kém chính xác hơn một chút — đây là lựa chọn CHỦ ĐỘNG, không tự hạ.
     whisper_beam_size: int = 5
+    # Whisper chạy trong venv riêng (.venv-whisper) khi đã cài
+    # scripts/setup_whisper.py — faster-whisper + ctranslate2 không cần bundle
+    # trong exe, giảm ~112 MB. Khi venv chưa có, app tự dùng faster-whisper
+    # đã cài trong môi trường hiện tại (dev) hoặc báo lỗi nếu thiếu (exe).
+    whisper_venv_python: str = ""   # mặc định: <app>/.venv-whisper/Scripts/python.exe
+    whisper_model_dir: str = ""     # mặc định: <app>/models/whisper (cache HuggingFace)
 
     # --- Giọng đọc tiếng Việt (VieNeu — bộ giọng DUY NHẤT) -----------------
     # Chạy trong venv riêng (.venv-vieneu) qua tiến trình con — cài một lần
@@ -152,7 +147,7 @@ class Settings:
     vieneu_venv_python: str = ""   # mặc định: <app>/.venv-vieneu/Scripts/python.exe
     vieneu_model_dir: str = ""     # mặc định: <app>/models/vieneu
     #: Tên giọng mặc định cho dự án mới (xem autodub.speech.tts.voices).
-    vieneu_voice: str = "Phạm Tuyên"
+    vieneu_voice: str = ""
     vieneu_style: str = "tu_nhien"   # "tu_nhien" | "tin_tuc" | "doc_truyen"
     # Số tiến trình con chạy song song (~1.5 GB RAM mỗi cái). Chạy trên CPU
     # nên tăng số luồng là nhanh lên gần như tuyến tính, tới khi hết nhân.
@@ -199,6 +194,10 @@ class Settings:
     translate_pronouns: str = ""     # quy ước xưng hô, vd "mình – các bạn"
     translate_glossary: str = ""     # thuật ngữ cố định, mỗi dòng "gốc = dịch"
     translate_style_notes: str = ""  # yêu cầu thêm về giọng văn
+    # Tiêu đề video gốc — KHÔNG nạp từ .env: pipeline tự bơm mỗi lượt chạy
+    # (đọc data/video_meta.json do downloader ghi) vào bản sao Settings để
+    # prompt dịch/phân tích biết video nói về gì ngay từ tiêu đề.
+    translate_video_title: str = ""
 
     # --- Dịch hai lượt ----------------------------------------------------
     # Lượt 0 "hiểu video": trước khi dịch, gửi toàn bộ lời thoại gốc để rút ra
@@ -220,50 +219,25 @@ class Settings:
 
     # --- Cập nhật và hỗ trợ -----------------------------------------------
     # Kho GitHub chứa bản phát hành (dạng "chủ/kho") — dùng để báo bản mới.
-    update_repo: str = "ttthanh2044/voxdub-releases"
+    update_repo: str = "ttthanh2044/voxdub"
     # Đường dẫn biểu mẫu nhận báo lỗi và góp ý từ người dùng.
-    support_url: str = "https://forms.gle/41fdB7zbF72kP2Mx6"
+    support_url: str = "https://github.com/ttthanh2044/voxdub/issues"
 
     # Liên kết video mặc định (dùng khi giao diện/chạy hàng loạt không đưa nguồn)
     video_url: str = ""
 
-    # --- Nội dung đăng bài (Google Gemini) --------------------------------
-    google_api_key: str = ""
-    image_model_id: str = "gemini-2.5-flash-image"
-    content_model_id: str = "gemini-flash-latest"
-    # Tạo luôn ảnh bìa bằng Gemini (prompt thì lúc nào cũng được lưu ra tệp)
-    generate_thumbnail_images: bool = False
-    # Tạo tiêu đề/mô tả/hashtag sau mỗi lần lồng tiếng. Tắt = bỏ hẳn bước này.
+    # --- Nội dung đăng bài ------------------------------------------------
+    # Tạo tiêu đề/mô tả/hashtag sau mỗi lần lồng tiếng (máy chủ viết).
+    # Tắt = bỏ hẳn bước này (và không tốn Vox).
     generate_metadata: bool = True
 
     # --- Dịch tự động -----------------------------------------------------
+    # Mô hình, lời nhắc và API key đều nằm trên máy chủ VoxDub — app chỉ gửi
+    # câu thoại và ngữ cảnh. Hai nút vặn dưới đây là thứ duy nhất còn lại ở
+    # phía máy khách vì chúng quyết định cách CHIA VIỆC, không phải cách dịch.
     translate_enabled: bool = True
-    # Số câu mỗi lượt gửi. Lô nhỏ giúp mô hình yếu trả lời đúng định dạng.
+    # Số câu mỗi lượt gửi lên máy chủ (trần cứng phía máy chủ là 120).
     translate_batch_size: int = 40
-    translate_max_retries: int = 3
-    #: Nơi dịch đang chọn — một trong :data:`TRANSLATE_ENGINES`.
-    translate_engine: str = "openrouter"
-
-    # Gemini (dùng chung GOOGLE_API_KEY với phần nội dung đăng bài)
-    gemini_translate_model: str = "gemini-flash-latest"
-
-    # Các nơi dịch tương thích OpenAI: mỗi nơi một bộ (API Key, địa chỉ,
-    # mô hình). "custom" để trỏ tới máy chủ tự dựng hoặc dịch vụ chưa có sẵn.
-    openrouter_api_key: str = ""
-    openrouter_url: str = ""
-    openrouter_model: str = ""
-    openai_api_key: str = ""
-    openai_url: str = ""
-    openai_model: str = ""
-    anthropic_api_key: str = ""
-    anthropic_url: str = ""
-    anthropic_model: str = ""
-    deepseek_api_key: str = ""
-    deepseek_url: str = ""
-    deepseek_model: str = ""
-    custom_api_key: str = ""
-    custom_url: str = ""
-    custom_model: str = ""
 
     # --- Phụ đề -----------------------------------------------------------
     # Kiểu mặc định: "none" | "soft" (tệp rời) | "burn" (ghi thẳng vào hình)
@@ -347,12 +321,6 @@ class Settings:
         def env_bool(key: str, default: str) -> bool:
             return env(key, default).strip().lower() in ("1", "true", "yes")
 
-        def env_secret(key: str, *aliases: str) -> str:
-            """Mục API Key: giá trị có thể nằm trong kho khóa hệ điều hành."""
-            from autodub.keystore import resolve
-
-            return resolve(key, env(key, "", *aliases).strip())
-
         # Mức chất lượng: nền mặc định cho các mục chi tiết. Biến môi trường
         # tường minh vẫn thắng (env() đọc chúng trước khi dùng tới preset).
         preset = _one_of(env("QUALITY_PRESET", "balanced"),
@@ -361,22 +329,6 @@ class Settings:
 
         # Tự tính số luồng theo CPU: một nửa số nhân logic, kẹp trong 2–8.
         auto_workers = str(min(8, max(2, (os.cpu_count() or 4) // 2)))
-
-        def provider(name: str) -> tuple[str, str, str]:
-            """(API Key, địa chỉ, mô hình) của một nơi dịch."""
-            url_default, model_default = _PROVIDER_DEFAULTS[name]
-            prefix = name.upper()
-            return (
-                env_secret(f"{prefix}_API_KEY"),
-                env(f"{prefix}_URL", url_default).strip(),
-                env(f"{prefix}_MODEL", model_default).strip(),
-            )
-
-        openrouter = provider("openrouter")
-        openai = provider("openai")
-        anthropic = provider("anthropic")
-        deepseek = provider("deepseek")
-        custom = provider("custom")
 
         return cls(
             quality_preset=preset,
@@ -389,8 +341,7 @@ class Settings:
             whisper_beam_size=max(1, min(10, env_int("WHISPER_BEAM_SIZE", "5"))),
             vieneu_venv_python=env("VIENEU_VENV_PYTHON"),
             vieneu_model_dir=env("VIENEU_MODEL_DIR"),
-            vieneu_voice=env("VIENEU_VOICE", "Phạm Tuyên").strip()
-                         or "Phạm Tuyên",
+            vieneu_voice=env("VIENEU_VOICE", "").strip(),
             vieneu_style=_one_of(env("VIENEU_STYLE", "tu_nhien"),
                                  ("tu_nhien", "tin_tuc", "doc_truyen"),
                                  "tu_nhien"),
@@ -433,43 +384,16 @@ class Settings:
             auto_clean_intermediates=env_bool("AUTO_CLEAN_INTERMEDIATES",
                                               "false"),
             update_repo=env("UPDATE_REPO",
-                            "ttthanh2044/voxdub-releases").strip(),
+                            "ttthanh2044/voxdub").strip(),
             support_url=env("SUPPORT_URL",
-                            "https://forms.gle/41fdB7zbF72kP2Mx6").strip(),
+                            "https://github.com/ttthanh2044/voxdub/issues").strip(),
             video_url=env("VIDEO_URL"),
-            google_api_key=env_secret("GOOGLE_API_KEY", "google_api_key"),
-            image_model_id=env("IMAGE_MODEL_ID", "gemini-2.5-flash-image",
-                               "image_model_id").strip(),
-            content_model_id=env("CONTENT_MODEL_ID", "gemini-flash-latest",
-                                 "content_model_id").strip(),
-            generate_thumbnail_images=env_bool("GENERATE_THUMBNAIL_IMAGES",
-                                               "false"),
             generate_metadata=env("GENERATE_METADATA", "true").strip().lower()
                               not in ("0", "false", "no"),
             translate_enabled=env("TRANSLATE_ENABLED", "true").strip().lower()
                               not in ("0", "false", "no"),
-            translate_batch_size=max(1, min(200,
+            translate_batch_size=max(1, min(100,
                 env_int("TRANSLATE_BATCH_SIZE", "40"))),
-            translate_max_retries=env_int("TRANSLATE_MAX_RETRIES", "3"),
-            translate_engine=_one_of(env("TRANSLATE_ENGINE", "openrouter"),
-                                     TRANSLATE_ENGINES, "openrouter"),
-            gemini_translate_model=env("GEMINI_TRANSLATE_MODEL",
-                                       "gemini-flash-latest").strip(),
-            openrouter_api_key=openrouter[0],
-            openrouter_url=openrouter[1],
-            openrouter_model=openrouter[2],
-            openai_api_key=openai[0],
-            openai_url=openai[1],
-            openai_model=openai[2],
-            anthropic_api_key=anthropic[0],
-            anthropic_url=anthropic[1],
-            anthropic_model=anthropic[2],
-            deepseek_api_key=deepseek[0],
-            deepseek_url=deepseek[1],
-            deepseek_model=deepseek[2],
-            custom_api_key=custom[0],
-            custom_url=custom[1],
-            custom_model=custom[2],
             subtitle_mode=_one_of(env("SUBTITLE_MODE", "none"),
                                   ("none", "soft", "burn"), "none"),
             subtitle_preset=env("SUBTITLE_PRESET", "clean").strip() or "clean",
@@ -516,43 +440,6 @@ class Settings:
                 f"Thiếu cấu hình bắt buộc: {env_names}. "
                 f"Điền vào trang Cài đặt (hoặc tệp .env) rồi chạy lại."
             )
-
-    # --- Nơi dịch ----------------------------------------------------------
-
-    def translate_credentials(self, engine: str | None = None
-                              ) -> tuple[str, str, str]:
-        """(API Key, địa chỉ, mô hình) của một nơi dịch tương thích OpenAI.
-
-        Gemini có đường đi riêng (thư viện google-genai) nên không dùng hàm này.
-        """
-        name = _one_of(engine or self.translate_engine, TRANSLATE_ENGINES,
-                       "openrouter")
-        if name == "gemini":
-            return self.google_api_key, "", self.gemini_translate_model
-        return (getattr(self, f"{name}_api_key", ""),
-                getattr(self, f"{name}_url", ""),
-                getattr(self, f"{name}_model", ""))
-
-    @staticmethod
-    def _real_key(key: str) -> bool:
-        """API Key này là mã thật hay chỉ là chỗ giữ chỗ trong tệp mẫu."""
-        key = (key or "").strip()
-        return bool(key) and "your_key" not in key and "_here" not in key
-
-    def translate_configured(self, engine: str | None = None) -> bool:
-        """Nơi dịch đang chọn đã đủ API Key, địa chỉ và mô hình chưa."""
-        if not self.translate_enabled:
-            return False
-        name = _one_of(engine or self.translate_engine, TRANSLATE_ENGINES,
-                       "openrouter")
-        key, url, model = self.translate_credentials(name)
-        if name == "gemini":
-            return self._real_key(key) and bool(model)
-        return self._real_key(key) and bool(url) and bool(model)
-
-    def gemini_configured(self) -> bool:
-        """Có API Key Gemini thật hay không (dùng cho ảnh bìa/metadata)."""
-        return self._real_key(self.google_api_key)
 
     # --- Phụ đề ------------------------------------------------------------
 
@@ -604,6 +491,25 @@ class Settings:
         """venv ASR và dấu hiệu cài đặt xong đều có mặt hay chưa."""
         return (os.path.isfile(self.asr_venv_python_path())
                 and os.path.isfile(os.path.join(self.paraformer_model_dir_path(),
+                                                "installed_ok.json")))
+
+    def whisper_venv_python_path(self) -> str:
+        """Trình thông dịch Python của venv dành riêng cho Whisper."""
+        if self.whisper_venv_python:
+            return self.whisper_venv_python
+        exe = "Scripts/python.exe" if os.name == "nt" else "bin/python"
+        return os.path.join(app_root(), ".venv-whisper", *exe.split("/"))
+
+    def whisper_model_dir_path(self) -> str:
+        """Thư mục cache model Whisper (HuggingFace)."""
+        if self.whisper_model_dir:
+            return self.whisper_model_dir
+        return os.path.join(app_root(), "models", "whisper")
+
+    def whisper_venv_configured(self) -> bool:
+        """venv Whisper đã cài và có marker hay chưa."""
+        return (os.path.isfile(self.whisper_venv_python_path())
+                and os.path.isfile(os.path.join(self.whisper_model_dir_path(),
                                                 "installed_ok.json")))
 
     def vieneu_venv_python_path(self) -> str:

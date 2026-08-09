@@ -4,14 +4,11 @@
 nữa mà chọn thẳng TÊN giọng. Giới tính, vùng miền và quốc gia chỉ còn là bộ
 lọc để tìm giọng cho nhanh.
 
-Hai nguồn giọng được gộp lại:
+Nguồn giọng DUY NHẤT: ``models/vieneu/custom_voices.json``, do
+:mod:`autodub.speech.tts.vieneu_worker` ghi ra sau khi enroll từ thư viện
+``voices/preset_voices_vn/`` (tải về lần đầu chạy app qua voice_downloader).
 
-1. **Giọng có sẵn** — 14 giọng đóng kèm model VieNeu v3-Turbo. Bảng
-   :data:`BUILTIN` giữ đầy đủ thông tin (giới tính, vùng miền, phong cách);
-   nếu bản cài đặt sinh ra ``models/vieneu/voices.json`` với giọng lạ thì
-   những giọng đó cũng được nạp thêm (đọc thông tin từ nhãn).
-2. **Giọng bạn tự thêm** — ``models/vieneu/custom_voices.json``, do
-   :mod:`autodub.speech.tts.vieneu_worker` ghi ra ở chế độ học giọng.
+Không còn giọng builtin hardcoded — catalog rỗng khi chưa tải voices.
 
 Module này KHÔNG nạp model và không phụ thuộc venv riêng của VieNeu, nên
 giao diện gọi thoải mái.
@@ -37,12 +34,12 @@ REGIONS: tuple[tuple[str, str], ...] = (
 
 COUNTRIES: tuple[tuple[str, str], ...] = (
     ("Việt Nam", "vn"),
-    ("Mỹ", "us"),
-    ("Anh", "uk"),
-    ("Nhật Bản", "jp"),
-    ("Hàn Quốc", "kr"),
-    ("Trung Quốc", "cn"),
-    ("Khác", "other"),
+    # ("Mỹ", "us"),
+    # ("Anh", "uk"),
+    # ("Nhật Bản", "jp"),
+    # ("Hàn Quốc", "kr"),
+    # ("Trung Quốc", "cn"),
+    # ("Khác", "other"),
 )
 
 STYLES: tuple[tuple[str, str], ...] = (
@@ -76,13 +73,19 @@ class Voice:
     style: str = "tu_nhien"   # khóa trong STYLES
     description: str = ""
     #: "builtin" (đóng kèm model) | "library" (thư mục voices/) | "custom"
-    #: (bạn tự học từ một đoạn ghi âm).
+    #: (bạn tự học từ một đoạn ghi âm) | "capcut" (bộ giọng CapCut, chỉ có
+    #: embedding — không có file âm thanh trên máy).
     source: str = "builtin"
 
     @property
     def custom(self) -> bool:
         """Giọng này do người dùng tự học hay không."""
         return self.source == "custom"
+
+    @property
+    def is_capcut(self) -> bool:
+        """Giọng thuộc bộ CapCut hay không."""
+        return self.source == "capcut"
 
     @property
     def label(self) -> str:
@@ -94,7 +97,8 @@ class Voice:
             _STYLE_LABEL.get(self.style, ""),
         ]
         detail = " · ".join(p for p in parts if p)
-        prefix = "Giọng bạn thêm · " if self.custom else ""
+        prefix = ("CapCut · " if self.is_capcut
+                  else "Giọng bạn thêm · " if self.custom else "")
         return f"{self.name} — {prefix}{detail}" if detail else self.name
 
     def matches(self, gender: str = "", region: str = "",
@@ -113,27 +117,22 @@ class Voice:
         return True
 
 
-# --- 14 giọng đóng kèm model VieNeu v3-Turbo -------------------------------
-# Khớp với assets/voices_v3_turbo.json của gói vieneu.
-BUILTIN: tuple[Voice, ...] = (
-    Voice("Minh Đức", "male", "bac", style="tin_tuc"),
-    Voice("Phạm Tuyên", "male", "bac", style="tu_nhien"),
-    Voice("Thanh Bình", "male", "bac", style="doc_truyen"),
-    Voice("Thái Sơn", "male", "nam", style="doc_truyen"),
-    Voice("Xuân Vĩnh", "male", "nam", style="tu_nhien"),
-    Voice("Minh Triết", "male", "nam", style="tin_tuc"),
-    Voice("Quang Sơn", "male", "trung", style="tu_nhien"),
-    Voice("Trúc Ly", "female", "bac", style="tu_nhien"),
-    Voice("Mai Anh", "female", "bac", style="tin_tuc"),
-    Voice("Ngọc Linh", "female", "bac", style="doc_truyen"),
-    Voice("Đoan Trang", "female", "bac", style="tu_nhien"),
-    Voice("Thục Đoan", "female", "nam", style="doc_truyen"),
-    Voice("Thùy Dung", "female", "nam", style="tin_tuc"),
-    Voice("Ngọc Trân", "female", "trung", style="tu_nhien"),
-)
+# --- Không có giọng builtin — tất cả phải tải từ internet ---------------
+# App tự động tải voices.zip từ GitHub lần đầu chạy (voice_downloader).
+BUILTIN: tuple[Voice, ...] = ()
 
-#: Giọng dùng khi tệp cấu hình chưa chọn gì.
-DEFAULT_VOICE = "Phạm Tuyên"
+
+def source_group(voice: Voice) -> str:
+    """Nhóm nguồn cho tab giao diện: "capcut" hoặc "offline" (mọi thứ khác).
+
+    Điểm phân loại DUY NHẤT — Thư viện giọng và ô chọn giọng đều gọi hàm này
+    để hai nơi không bao giờ chia tab khác nhau.
+    """
+    return "capcut" if voice.is_capcut else "offline"
+
+#: Giọng fallback khi catalog trống (ví dụ chưa tải voices).
+# Tên này sẽ trùng với một giọng trong thư viện sau khi tải.
+DEFAULT_VOICE = "Trần Hải"
 
 
 def _from_label(name: str, label: str) -> Voice:
@@ -156,27 +155,11 @@ def _from_label(name: str, label: str) -> Voice:
 
 
 def _builtin_voices(model_dir: str) -> list[Voice]:
-    """Giọng có sẵn: bảng tĩnh, cộng thêm giọng lạ tìm thấy trong voices.json."""
-    voices = list(BUILTIN)
-    known = {v.name for v in voices}
-    path = os.path.join(model_dir or "", "voices.json")
-    if not path or not os.path.isfile(path):
-        return voices
-    try:
-        with open(path, encoding="utf-8") as f:
-            entries = json.load(f)
-    except (OSError, ValueError):
-        return voices
-    if not isinstance(entries, list):
-        return voices
-    for entry in entries:
-        if not isinstance(entry, dict):
-            continue
-        name = str(entry.get("name", "")).strip()
-        if name and name not in known:
-            voices.append(_from_label(name, str(entry.get("label", ""))))
-            known.add(name)
-    return voices
+    """Không còn giọng builtin — mọi giọng đều đến từ custom_voices.json.
+
+    Hàm giữ lại để không vỡ code gọi catalog(); luôn trả về danh sách rỗng.
+    """
+    return []
 
 
 def _custom_voices(custom_path: str) -> list[Voice]:
@@ -192,6 +175,12 @@ def _custom_voices(custom_path: str) -> list[Voice]:
     for name, entry in (presets or {}).items():
         if not isinstance(entry, dict) or not str(name).strip():
             continue
+        source = str(entry.get("source", "") or "custom")
+        # Bản cũ từng enroll 16 giọng clone source="capcut" vào file này.
+        # Giờ giọng CapCut đến từ API (_capcut_voices) và trùng tên, nên bỏ
+        # qua preset cũ để nó không chắn mất giọng API.
+        if source == "capcut":
+            continue
         voices.append(Voice(
             name=str(name),
             gender=str(entry.get("gender", "")),
@@ -199,25 +188,73 @@ def _custom_voices(custom_path: str) -> list[Voice]:
             country=str(entry.get("country", "") or "vn"),
             style=str(entry.get("style", "") or "tu_nhien"),
             description=str(entry.get("description", "")),
-            source=str(entry.get("source", "") or "custom"),
+            source=source,
         ))
     return voices
 
 
+def _capcut_voices() -> list[Voice]:
+    """Giọng CapCut gọi qua API — chỉ đọc JSON tĩnh trong gói, không mạng."""
+    from autodub.speech.tts import capcut_catalog
+
+    return [Voice(name=e["name"], gender=e["gender"], region="",
+                  country="vn", style="tu_nhien",
+                  description=e["description"], source="capcut")
+            for e in capcut_catalog.entries()]
+
+
+def is_capcut_voice(name: str) -> bool:
+    """Tên giọng này thuộc bộ CapCut (gọi API) hay bộ offline (VieNeu)."""
+    from autodub.speech.tts import capcut_catalog
+
+    return (name or "").strip() in capcut_catalog.names()
+
+
+#: Cache danh mục giọng — tránh đọc lại JSON mỗi lần gọi (A5 fix).
+#: Khoá theo đường dẫn file, huỷ hiệu lực khi mtime đổi (enroll giọng mới).
+_catalog_cache: dict[str, tuple[float, list[Voice]]] = {}
+
+
 def catalog(settings) -> list[Voice]:
-    """Toàn bộ giọng dùng được: giọng tự thêm đứng trước, rồi giọng có sẵn."""
-    custom = _custom_voices(settings.vieneu_custom_voices_path())
+    """Toàn bộ giọng dùng được: giọng tự thêm, giọng có sẵn, rồi giọng CapCut.
+
+    Kết quả được cache theo mtime của ``custom_voices.json`` — giao diện gọi
+    hàm này rất nhiều lần (bộ lọc, ô chọn giọng, resolve) nên đọc đĩa mỗi lần
+    là lãng phí. Enroll giọng mới đổi mtime nên cache tự huỷ hiệu lực. Giọng
+    CapCut đọc từ file tĩnh trong gói nên không ảnh hưởng khoá cache.
+    """
+    custom_path = settings.vieneu_custom_voices_path()
+    try:
+        mtime = os.path.getmtime(custom_path) if custom_path else 0.0
+    except OSError:
+        mtime = 0.0
+
+    cached = _catalog_cache.get(custom_path)
+    if cached is not None and cached[0] == mtime:
+        return cached[1]
+
+    custom = _custom_voices(custom_path)
     builtin = _builtin_voices(settings.vieneu_model_dir_path())
     taken = {v.name for v in custom}
-    return custom + [v for v in builtin if v.name not in taken]
+    result = custom + [v for v in builtin if v.name not in taken]
+    taken |= {v.name for v in result}
+    result += [v for v in _capcut_voices() if v.name not in taken]
+    _catalog_cache[custom_path] = (mtime, result)
+    return result
+
+
+def invalidate_catalog_cache() -> None:
+    """Xoá cache danh mục — gọi sau khi enroll/xoá giọng để nạp lại ngay."""
+    _catalog_cache.clear()
 
 
 def resolve(settings, name: str | None = None) -> str:
     """Tên giọng dùng thật cho một lần chạy.
 
     Thứ tự ưu tiên: tên gọi truyền vào → giọng mặc định trong cấu hình →
-    giọng đầu tiên của danh mục → :data:`DEFAULT_VOICE`. Luôn trả về một tên
-    có trong danh mục để worker không chết vì «unknown voice».
+    :data:`DEFAULT_VOICE` → giọng đầu tiên của danh mục. Luôn trả về một tên
+    có trong danh mục để worker không chết vì «unknown voice»; máy chưa cài
+    VieNeu vẫn có bộ giọng CapCut nên danh mục không bao giờ rỗng thật sự.
     """
     voices = catalog(settings)
     names = {v.name for v in voices}
@@ -227,4 +264,8 @@ def resolve(settings, name: str | None = None) -> str:
             return candidate
     if DEFAULT_VOICE in names:
         return DEFAULT_VOICE
-    return voices[0].name if voices else DEFAULT_VOICE
+    if voices:
+        return voices[0].name
+    from autodub.speech.tts.capcut_catalog import DEFAULT_CAPCUT_VOICE
+
+    return DEFAULT_CAPCUT_VOICE

@@ -18,15 +18,20 @@ TAB_BASIC = "Cơ bản"
 TAB_VOICE = "Giọng đọc"
 TAB_SUBTITLE = "Phụ đề"
 TAB_PERF = "Hiệu suất"
-TAB_API = "Kết nối"
+#: Thẻ "Dịch thuật" — mọi API Key đã lên máy chủ, ở đây chỉ còn NGỮ CẢNH:
+#: những gì người dùng biết về video mà máy chủ không thể tự đoán.
+TAB_TRANSLATE = "Dịch thuật"
 TAB_ADVANCED = "Nâng cao"
 
-TABS = (TAB_BASIC, TAB_VOICE, TAB_SUBTITLE, TAB_PERF, TAB_API, TAB_ADVANCED)
+TABS = (TAB_BASIC, TAB_VOICE, TAB_SUBTITLE, TAB_PERF, TAB_TRANSLATE, TAB_ADVANCED)
+
+# Ba thẻ Giọng đọc, Phụ đề và Dịch thuật đã tách thành trang Công cụ riêng
+# trên thanh bên, nên trang Cài đặt chỉ còn giữ những thẻ dưới đây để khỏi trùng.
+SETTINGS_TABS = (TAB_BASIC, TAB_PERF, TAB_ADVANCED)
 
 # Kiểu ô nhập
 COMBO = "combo"
 TEXT = "text"
-SECRET = "secret"
 CHECK = "check"
 SLIDER = "slider"
 NUMBER = "number"
@@ -264,123 +269,49 @@ FIELDS: tuple[Field, ...] = (
           "Xuất video xong là dọn ngay các tệp trung gian nặng. Tiết kiệm "
           "đĩa, nhưng dự án đó sẽ không sửa từng câu hay xuất lại được nữa."),
 
-    # -- Thẻ Kết nối --------------------------------------------------
-    Field("TRANSLATE_ENABLED", CHECK, "Bật dịch tự động", TAB_API,
+    # -- Thẻ Dịch thuật ------------------------------------------------
+    # Mô hình, lời nhắc và API Key nằm trên máy chủ VoxDub. Người dùng không
+    # chọn nơi dịch nữa — thứ họ đóng góp được là NGỮ CẢNH: video nói về gì,
+    # xưng hô ra sao, thuật ngữ nào phải dịch cố định. Máy chủ tự phân tích
+    # được phần lớn, nhưng người làm kênh biết rõ hơn máy.
+    Field("TRANSLATE_ENABLED", CHECK, "Bật dịch tự động", TAB_TRANSLATE,
           "Dịch tự động", "true",
-          "Tắt đi thì ứng dụng dừng lại ở bước dịch và hướng dẫn bạn dịch tay."),
-    Field("TRANSLATE_ENGINE", COMBO, "Dịch bằng", TAB_API, "Dịch tự động",
-          "openrouter",
-          "Chọn nơi thực hiện việc dịch, rồi điền API Key của nơi đó ở "
-          "nhóm bên dưới.",
-          options=consts.TRANSLATE_ENGINE_CHOICES),
-    Field("TRANSLATE_BATCH_SIZE", NUMBER, "Số câu mỗi lượt gửi", TAB_API,
+          "Bật: máy chủ dịch toàn bộ, 12 Vox mỗi câu thoại. Tắt: ứng dụng "
+          "dừng ở bước dịch và hướng dẫn bạn dịch tay, còn 10 Vox mỗi câu."),
+    Field("TRANSLATE_BATCH_SIZE", NUMBER, "Số câu mỗi lượt gửi", TAB_TRANSLATE,
           "Dịch tự động", "40",
-          "Ít câu hơn thì chậm hơn nhưng mô hình yếu ít trả lời sai định dạng.",
-          minimum=1, maximum=200, step=5, decimals=0),
+          "Lô nhỏ hơn thì chậm hơn một chút nhưng mạch dịch bám ngữ cảnh sát "
+          "hơn. Không ảnh hưởng số Vox — tính theo câu, không theo lượt gửi.",
+          minimum=1, maximum=100, step=5, decimals=0),
 
-    Field("GOOGLE_API_KEY", SECRET, "API Key Gemini", TAB_API,
-          "Google Gemini", "", "Lấy miễn phí tại aistudio.google.com/apikey.",
-          placeholder="dán API Key vào đây"),
-    Field("GEMINI_TRANSLATE_MODEL", TEXT, "Mô hình", TAB_API,
-          "Google Gemini", "gemini-flash-latest",
-          "Tên mô hình dùng để dịch. gemini-flash-latest luôn trỏ tới bản mới "
-          "nhất nên không bao giờ lỗi thời.",
-          placeholder="gemini-flash-latest"),
-
-    Field("OPENROUTER_API_KEY", SECRET, "API Key OpenRouter", TAB_API,
-          "OpenRouter", "", "Lấy tại openrouter.ai/keys.",
-          placeholder="dán API Key vào đây"),
-    Field("OPENROUTER_URL", TEXT, "Địa chỉ máy chủ", TAB_API, "OpenRouter",
-          "https://openrouter.ai/api/v1/chat/completions",
-          "Để nguyên trừ khi bạn tự dựng máy chủ trung gian.",
-          placeholder="https://openrouter.ai/api/v1/chat/completions"),
-    Field("OPENROUTER_MODEL", TEXT, "Mô hình", TAB_API, "OpenRouter",
-          "google/gemini-2.5-flash",
-          "Chọn mô hình tại openrouter.ai/models. Mô hình có đuôi :free là "
-          "miễn phí.", placeholder="google/gemini-2.5-flash"),
-
-    Field("OPENAI_API_KEY", SECRET, "API Key OpenAI", TAB_API, "OpenAI",
-          "", "Lấy tại platform.openai.com/api-keys.",
-          placeholder="dán API Key vào đây"),
-    Field("OPENAI_URL", TEXT, "Địa chỉ máy chủ", TAB_API, "OpenAI",
-          "https://api.openai.com/v1/chat/completions",
-          "Để nguyên trừ khi bạn dùng máy chủ trung gian.",
-          placeholder="https://api.openai.com/v1/chat/completions"),
-    Field("OPENAI_MODEL", TEXT, "Mô hình", TAB_API, "OpenAI", "gpt-4o-mini",
-          "Tên mô hình dùng để dịch.", placeholder="gpt-4o-mini"),
-
-    Field("ANTHROPIC_API_KEY", SECRET, "API Key Anthropic", TAB_API,
-          "Anthropic", "", "Lấy tại console.anthropic.com.",
-          placeholder="dán API Key vào đây"),
-    Field("ANTHROPIC_URL", TEXT, "Địa chỉ máy chủ", TAB_API, "Anthropic",
-          "https://api.anthropic.com/v1/chat/completions",
-          "Địa chỉ tương thích chuẩn OpenAI của Anthropic.",
-          placeholder="https://api.anthropic.com/v1/chat/completions"),
-    Field("ANTHROPIC_MODEL", TEXT, "Mô hình", TAB_API, "Anthropic",
-          "claude-haiku-4-5-20251001",
-          "Tên mô hình dùng để dịch.", placeholder="claude-haiku-4-5-20251001"),
-
-    Field("DEEPSEEK_API_KEY", SECRET, "API Key DeepSeek", TAB_API,
-          "DeepSeek", "", "Lấy tại platform.deepseek.com.",
-          placeholder="dán API Key vào đây"),
-    Field("DEEPSEEK_URL", TEXT, "Địa chỉ máy chủ", TAB_API, "DeepSeek",
-          "https://api.deepseek.com/v1/chat/completions",
-          "Để nguyên trừ khi bạn dùng máy chủ trung gian.",
-          placeholder="https://api.deepseek.com/v1/chat/completions"),
-    Field("DEEPSEEK_MODEL", TEXT, "Mô hình", TAB_API, "DeepSeek",
-          "deepseek-chat", "Tên mô hình dùng để dịch.",
-          placeholder="deepseek-chat"),
-
-    Field("CUSTOM_API_KEY", SECRET, "API Key", TAB_API,
-          "Dịch vụ khác", "",
-          "Dành cho dịch vụ chưa có sẵn ở trên, hoặc máy chủ bạn tự dựng.",
-          placeholder="dán API Key vào đây"),
-    Field("CUSTOM_URL", TEXT, "Địa chỉ máy chủ", TAB_API, "Dịch vụ khác", "",
-          "Địa chỉ đầy đủ của điểm cuối chat, theo chuẩn OpenAI.",
-          placeholder="https://may-chu-cua-ban/v1/chat/completions"),
-    Field("CUSTOM_MODEL", TEXT, "Mô hình", TAB_API, "Dịch vụ khác", "",
-          "Tên mô hình đúng như dịch vụ đó quy định.",
-          placeholder="ten-mo-hinh"),
-
-    Field("TRANSLATE_DOMAIN", TEXT, "Chủ đề video", TAB_API,
+    Field("TRANSLATE_DOMAIN", TEXT, "Chủ đề video", TAB_TRANSLATE,
           "Ngữ cảnh video", "",
-          "Càng cụ thể thì bản dịch càng đúng ngữ cảnh.",
+          "Càng cụ thể thì bản dịch càng đúng ngữ cảnh. Để trống thì máy chủ "
+          "tự đoán từ lời thoại.",
           placeholder="ví dụ: review công nghệ, phim cổ trang, vlog ẩm thực"),
-    Field("TRANSLATE_CONTEXT", MULTILINE, "Ngữ cảnh", TAB_API,
+    Field("TRANSLATE_CONTEXT", MULTILINE, "Ngữ cảnh", TAB_TRANSLATE,
           "Ngữ cảnh video", "",
           "Mô tả kênh nói về gì, người xem là ai.",
           placeholder="ví dụ: Kênh đập hộp linh kiện máy tính giá rẻ, "
                       "người xem là dân tự lắp máy."),
-    Field("TRANSLATE_PRONOUNS", TEXT, "Cách xưng hô", TAB_API,
+    Field("TRANSLATE_PRONOUNS", TEXT, "Cách xưng hô", TAB_TRANSLATE,
           "Ngữ cảnh video", "",
           "Giúp bản dịch xưng hô nhất quán từ đầu tới cuối.",
           placeholder="ví dụ: mình – các bạn  |  tôi – anh em"),
-    Field("TRANSLATE_GLOSSARY", MULTILINE, "Thuật ngữ cố định", TAB_API,
+    Field("TRANSLATE_GLOSSARY", MULTILINE, "Thuật ngữ cố định", TAB_TRANSLATE,
           "Ngữ cảnh video", "",
           "Mỗi dòng một cặp, viết dạng gốc = bản dịch.",
           placeholder="显卡 = card đồ họa\n翻车 = toang"),
     Field("TRANSLATE_STYLE_NOTES", TEXT, "Yêu cầu khác cho người dịch",
-          TAB_API, "Ngữ cảnh video", "",
+          TAB_TRANSLATE, "Ngữ cảnh video", "",
           "Ghi chú này được gửi kèm mỗi lần dịch.",
           placeholder="ví dụ: giọng hài hước, giữ tên nhân vật Hán Việt"),
 
     Field("GENERATE_METADATA", CHECK,
-          "Tạo tiêu đề, mô tả và thẻ cho mạng xã hội", TAB_API,
+          "Tạo tiêu đề, mô tả và thẻ cho mạng xã hội", TAB_TRANSLATE,
           "Nội dung đăng bài", "true",
-          "Dùng chính nơi dịch bạn đã chọn ở trên. Kết quả lưu vào thư mục "
-          "dự án, tệp youtube_post.txt."),
-    Field("GENERATE_THUMBNAIL_IMAGES", CHECK,
-          "Vẽ luôn ảnh bìa", TAB_API, "Nội dung đăng bài", "false",
-          "Ảnh được vẽ bằng Gemini nên cần API Key Gemini ở trên. Prompt "
-          "ảnh bìa thì lúc nào cũng được lưu ra tệp."),
-    Field("CONTENT_MODEL_ID", TEXT, "Mô hình viết nội dung", TAB_API,
-          "Nội dung đăng bài", "gemini-flash-latest",
-          "Chỉ dùng khi phần nội dung chạy bằng Gemini.",
-          placeholder="gemini-flash-latest"),
-    Field("IMAGE_MODEL_ID", TEXT, "Mô hình vẽ ảnh bìa", TAB_API,
-          "Nội dung đăng bài", "gemini-2.5-flash-image",
-          "Mô hình vẽ ảnh của Gemini.",
-          placeholder="gemini-2.5-flash-image"),
+          "Kết quả lưu vào thư mục dự án, tệp youtube_post.txt. Thêm 20 Vox "
+          "mỗi video — tắt đi nếu bạn tự viết."),
 )
 
 # Khóa do ứng dụng tự tính hoặc chỉ dùng nội bộ, không hiện thành ô nhập chữ.
@@ -396,6 +327,9 @@ EXEMPT_KEYS: dict[str, str] = {
                    "không cần đổi; ai cần thì sửa thẳng trong .env",
     "SUPPORT_URL": "đường dẫn biểu mẫu báo lỗi cố định, chỉ hiện ở nút Gửi "
                    "báo lỗi chứ không phải cấu hình của người dùng",
+    "VOXDUB_API_URL": "địa chỉ máy chủ được nhúng cứng vào bản đóng gói; "
+                      "chỉ đọc từ .env khi chạy từ mã nguồn (dev), người "
+                      "dùng cuối không đổi được và không cần đổi",
 }
 
 

@@ -1,8 +1,0 @@
-{
-  "respectGitignore": true,
-  "contextFiles": ["CLAUDE.md"],
-  "allowedTools": [],
-  "mcpServers": {},
-  "enabledMcpjsonServers": [],
-  "disabledMcpjsonServers": []
-}

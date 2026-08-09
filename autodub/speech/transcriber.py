@@ -1,12 +1,18 @@
 import ctypes
 import json
 import os
+import subprocess
+import threading
+from collections import deque
 
 from autodub.config import Settings
 from autodub.languages import WHISPER_LANG_MAP
-from autodub.utils import gpu_venv_dir, save_json_atomic, setup_logging
+from autodub.resources import GPU_LOCK
+from autodub.utils import bundled_file, gpu_venv_dir, save_json_atomic, setup_logging
 
 logger = setup_logging("autodub.transcriber")
+
+_WHISPER_WORKER_SCRIPT = bundled_file("autodub", "speech", "asr_whisper_worker.py")
 
 
 def _enable_cuda_dlls() -> bool:
@@ -61,22 +67,94 @@ def _load_whisper_model(model_name: str, settings: Settings):
     GPU-exclusive so the ~3 GB fits even on 6 GB cards), medium on CPU —
     the accuracy gap on Chinese sources is the single biggest translation-
     quality lever upstream of the translator itself.
+
+    Returns ``(model, device)`` — device is "cuda" or "cpu"; the batch
+    cache needs it to decide whether keeping the model resident is safe.
     """
     from faster_whisper import WhisperModel
 
     if _enable_cuda_dlls():
         resolved = settings.resolved_whisper_model(cuda_available=True)
-        try:
-            model = WhisperModel(resolved, device="cuda", compute_type="int8")
-            logger.info(f"Whisper '{resolved}' chạy trên GPU (CUDA)")
-            return model
-        except Exception as e:
-            logger.warning(f"Không chạy được Whisper trên GPU ({e}) — dùng CPU")
+        # GPU_LOCK chỉ quanh lúc NẠP: đây là đoạn xin VRAM, cũng là chỗ chen
+        # với Demucs thì OOM. Giữ lock suốt lượt nghe sẽ chặn Demucs hàng chục
+        # phút mà không cần thiết. Xem autodub/resources.py.
+        with GPU_LOCK:
+            # float16 là kiểu tính GPU chạy nhanh nhất của ctranslate2 (Tensor
+            # Core). int8 trên CUDA phải giải lượng tử liên tục nên CHẬM hơn
+            # float16 dù ít VRAM hơn — chỉ dùng khi float16 không nạp được.
+            for compute in ("float16", "int8_float16", "int8"):
+                try:
+                    model = WhisperModel(resolved, device="cuda",
+                                         compute_type=compute)
+                    logger.info(f"Whisper '{resolved}' chạy trên GPU "
+                                f"(CUDA, {compute})")
+                    return model, "cuda"
+                except Exception as e:
+                    logger.warning(
+                        f"Whisper GPU {compute} không chạy được ({e})")
+        logger.warning("Không chạy được Whisper trên GPU — dùng CPU")
     resolved = settings.resolved_whisper_model(cuda_available=False)
-    return WhisperModel(resolved, device="cpu", compute_type="int8")
+    return WhisperModel(resolved, device="cpu", compute_type="int8"), "cpu"
 
 
-def transcribe(audio_path: str, language: str, settings: Settings) -> list[dict]:
+def _gpu_total_vram_gb() -> float:
+    """Tổng VRAM (GB) của card lớn nhất; 0.0 nếu không đọc được."""
+    import subprocess
+
+    try:
+        out = subprocess.run(
+            ["nvidia-smi", "--query-gpu=memory.total",
+             "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=10,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        if out.returncode == 0 and out.stdout.strip():
+            return max(float(x) for x in out.stdout.split()) / 1024.0
+    except Exception:
+        pass
+    return 0.0
+
+
+class WhisperCache:
+    """Dùng lại một model Whisper đã nạp xuyên suốt nhiều video (batch).
+
+    Nạp large-v3 từ đĩa mất hàng chục giây mỗi video — với lô hàng trăm
+    video là hàng giờ vô ích. Giữ thường trú thì phải cân VRAM: trên CPU
+    luôn an toàn; trên GPU chỉ giữ khi card ≥ 10 GB (card 6 GB cần trả
+    ~2 GB của Whisper cho Demucs của video kế tiếp — giữ lại sẽ đẩy
+    Demucs rơi về CPU, chậm hơn nhiều so với 20 giây tiết kiệm được).
+    """
+
+    _KEEP_GPU_MIN_VRAM_GB = 10.0
+
+    def __init__(self):
+        self._model = None
+        self._key = None
+
+    def get(self, settings: Settings):
+        """Trả về model đã nạp; tự quyết định có giữ thường trú hay không."""
+        key = settings.whisper_model
+        if self._model is not None and self._key == key:
+            logger.info("Dùng lại model Whisper đã nạp (batch)")
+            return self._model
+        self.close()
+        model, device = _load_whisper_model(key, settings)
+        if device == "cpu" or _gpu_total_vram_gb() >= self._KEEP_GPU_MIN_VRAM_GB:
+            self._model = model
+            self._key = key
+        return model
+
+    def owns(self, model) -> bool:
+        return model is not None and model is self._model
+
+    def close(self) -> None:
+        if self._model is not None:
+            self._model = None
+            self._key = None
+            _release_vram()
+
+
+def transcribe(audio_path: str, language: str, settings: Settings,
+               whisper_cache: "WhisperCache | None" = None) -> list[dict]:
     """Transcribe audio with the configured local ASR (free, offline).
 
     Engines: Whisper (default, multilingual) or Paraformer (Chinese only,
@@ -103,7 +181,20 @@ def transcribe(audio_path: str, language: str, settings: Settings) -> list[dict]
             except Exception as e:
                 logger.warning(f"Paraformer lỗi ({e}) — chuyển sang Whisper")
     if segments is None:
-        segments = _transcribe_whisper(audio_path, language, settings)
+        # Ưu tiên subprocess worker (venv riêng) để không cần bundle
+        # faster-whisper trong exe — cắt ~112 MB kích thước bản phân phối.
+        # Fallback về in-process khi venv chưa cài (dev) hoặc cache đang giữ.
+        if whisper_cache is None and settings.whisper_venv_configured():
+            try:
+                segments = _transcribe_whisper_subprocess(
+                    audio_path, language, settings)
+            except Exception as e:
+                logger.warning(
+                    f"Whisper subprocess lỗi ({e}) — thử in-process")
+                segments = None
+        if segments is None:
+            segments = _transcribe_whisper(audio_path, language, settings,
+                                           whisper_cache)
 
     logger.info(f"Transcription complete: {len(segments)} raw segments")
 
@@ -116,6 +207,142 @@ def transcribe(audio_path: str, language: str, settings: Settings) -> list[dict]
     for seg in segments:
         seg.pop("words", None)
 
+    return segments
+
+
+def _transcribe_whisper_subprocess(
+    audio_path: str, language: str, settings: Settings
+) -> list[dict]:
+    """Chạy Whisper trong .venv-whisper (subprocess) — không cần bundle
+    faster-whisper/ctranslate2 trong exe, giảm ~112 MB bản phân phối.
+
+    Dùng cùng JSON-line protocol với asr_paraformer_worker nên kết quả
+    có format Whisper-shaped giống hệt đường in-process.
+    """
+    # Tìm thư mục torch/lib để worker có thể nạp cuBLAS trên Windows
+    cuda_dll_dir = ""
+    venv = gpu_venv_dir()
+    if venv and os.name == "nt":
+        _lib = os.path.join(venv, "Lib", "site-packages", "torch", "lib")
+        if os.path.isdir(_lib):
+            cuda_dll_dir = _lib
+
+    cmd = [
+        settings.whisper_venv_python_path(),
+        _WHISPER_WORKER_SCRIPT,
+        "--audio",     audio_path,
+        "--model",     settings.whisper_model,
+        "--language",  language or "",
+        "--beam-size", str(settings.whisper_beam_size),
+        "--model-dir", settings.whisper_model_dir_path(),
+    ]
+    if cuda_dll_dir:
+        cmd += ["--cuda-dll-dir", cuda_dll_dir]
+
+    logger.info("Khởi động Whisper worker (subprocess) ...")
+    proc = subprocess.Popen(
+        cmd,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        encoding="utf-8",
+        errors="replace",
+    )
+
+    stderr_tail: deque[str] = deque(maxlen=30)
+
+    def _drain() -> None:
+        try:
+            for line in proc.stderr:
+                line = line.rstrip()
+                if line:
+                    stderr_tail.append(line)
+                    logger.debug(f"[whisper-worker] {line}")
+        except (ValueError, OSError):
+            pass
+
+    threading.Thread(target=_drain, daemon=True).start()
+
+    # Đọc {"ready": true} trước khi gửi request
+    ready_line = proc.stdout.readline().strip()
+    try:
+        ready = json.loads(ready_line)
+    except (json.JSONDecodeError, ValueError):
+        proc.kill()
+        raise RuntimeError(
+            f"Whisper worker không phản hồi ready: {ready_line!r}\n"
+            + "\n".join(stderr_tail))
+    if not ready.get("ready"):
+        proc.kill()
+        raise RuntimeError(
+            f"Whisper worker báo lỗi: {ready}\n" + "\n".join(stderr_tail))
+
+    logger.info("Whisper worker sẵn sàng — gửi request nhận dạng")
+
+    # Gửi request
+    req = {"audio": audio_path, "language": language or "",
+           "beam_size": settings.whisper_beam_size}
+    proc.stdin.write(json.dumps(req, ensure_ascii=False) + "\n")
+    proc.stdin.flush()
+    proc.stdin.close()
+
+    segments: list[dict] = []
+    done = False
+    try:
+        for line in proc.stdout:
+            line = line.strip()
+            if not line or not line.startswith("{"):
+                continue
+            try:
+                msg = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if msg.get("error"):
+                raise RuntimeError(f"Whisper worker: {msg['error']}")
+            if msg.get("seg"):
+                start = float(msg["start"])
+                end   = float(msg["end"])
+                seg: dict = {
+                    "id":       msg.get("id", len(segments) + 1),
+                    "text":     str(msg.get("text", "")).strip(),
+                    "start":    round(start, 3),
+                    "end":      round(end, 3),
+                    "duration": round(end - start, 3),
+                }
+                words = msg.get("words")
+                if words:
+                    seg["words"] = words
+                segments.append(seg)
+                logger.info(f"Segment {seg['id']}: "
+                            f"[{start:.1f}s-{end:.1f}s] "
+                            f"{seg['text'][:50]}...")
+            elif msg.get("done"):
+                done = True
+                lang = msg.get("language", "")
+                if lang:
+                    logger.info(
+                        f"Ngôn ngữ: {lang} "
+                        f"({msg.get('language_prob', 0):.0%})")
+        proc.wait(timeout=7200)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+        for s in (proc.stdout, proc.stderr):
+            if s:
+                try:
+                    s.close()
+                except Exception:
+                    pass
+
+    tail = "\n".join(stderr_tail)
+    if not done:
+        raise RuntimeError(
+            f"Whisper worker thoát bất thường (exit {proc.returncode})"
+            + (f"\n{tail}" if tail else ""))
+    if not segments:
+        raise RuntimeError(
+            "Whisper worker không nhận dạng được câu nào"
+            + (f"\n{tail}" if tail else ""))
     return segments
 
 
@@ -133,7 +360,8 @@ def _release_vram() -> None:
     logger.info("Đã giải phóng bộ nhớ Whisper cho bước tạo giọng")
 
 
-def _transcribe_whisper(audio_path: str, language: str, settings: Settings) -> list[dict]:
+def _transcribe_whisper(audio_path: str, language: str, settings: Settings,
+                        whisper_cache: "WhisperCache | None" = None) -> list[dict]:
     """Local ASR via faster-whisper — free, offline, no API key needed.
 
     ``word_timestamps=True``: mỗi segment mang kèm mảng ``words``
@@ -144,8 +372,11 @@ def _transcribe_whisper(audio_path: str, language: str, settings: Settings) -> l
     whisper_lang = WHISPER_LANG_MAP.get(language, language.split("-")[0])
     model_name = settings.whisper_model
 
-    logger.info(f"Loading Whisper model: {model_name} (first run downloads the model)")
-    model = _load_whisper_model(model_name, settings)
+    if whisper_cache is not None:
+        model = whisper_cache.get(settings)
+    else:
+        logger.info(f"Loading Whisper model: {model_name} (first run downloads the model)")
+        model, _device = _load_whisper_model(model_name, settings)
 
     logger.info(f"Starting transcription: {audio_path} (language: {whisper_lang})")
     raw_segments, info = model.transcribe(
@@ -188,9 +419,12 @@ def _transcribe_whisper(audio_path: str, language: str, settings: Settings) -> l
 
     # The transcript is fully materialised — hand the VRAM back before the
     # TTS step sizes its worker pool. raw_segments (a generator) also pins
-    # the model, so drop both before collecting.
+    # the model, so drop both before collecting. Model thường trú của
+    # WhisperCache thì giữ lại (cache đã cân VRAM khi quyết định giữ).
+    keep = whisper_cache is not None and whisper_cache.owns(model)
     del model, raw_segments
-    _release_vram()
+    if not keep:
+        _release_vram()
 
     return segments
 

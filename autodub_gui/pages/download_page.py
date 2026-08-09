@@ -24,6 +24,7 @@ from autodub_gui.ui.table import Column, DataTable
 from autodub_gui.ui.toast import TOASTS
 from autodub_gui.widgets import LogPanel
 from autodub_gui.workers import DownloadWorker
+from autodub_gui.log_text import error_line
 
 _PAGE_MARGIN = 28
 _INPUT_MIN_H = 90
@@ -230,7 +231,7 @@ class DownloadPage(BasePage):
         self._urls = urls
         self._status = {url: ("waiting", "") for url in urls}
         self._refresh_table()
-        self.log.clear()
+        self.log.reset_log()
         self._set_running(True)
 
         worker = DownloadWorker(urls, self.output.text() or "downloads",
@@ -243,7 +244,9 @@ class DownloadPage(BasePage):
         worker.finished.connect(lambda: self._set_running(False))
         self._worker = worker
         REGISTRY.start_job(
-            ActiveJob(kind="download", title=f"Tải {len(urls)} video"),
+            ActiveJob(kind="download", title=f"Tải {len(urls)} video",
+                      # Chuông thông báo mở được thư mục chứa video tải về.
+                      work_dir=os.path.abspath(self.output.text() or "downloads")),
             on_cancel=self._cancel)
         worker.start()
 
@@ -275,6 +278,8 @@ class DownloadPage(BasePage):
         self.finished_all.emit(success, failed)
 
     def _on_failed(self, message: str) -> None:
+        text, level = error_line(message)
+        self.log.append_log(text, level)
         REGISTRY.finish_job(False, message[:120])
         ConfirmDialog.show_error(
             self, "Không tải được",
@@ -282,8 +287,9 @@ class DownloadPage(BasePage):
             "khác mà bạn có quyền ghi, rồi thử lại.", detail=message)
 
     def _on_cancelled(self) -> None:
+        import logging as _log
         REGISTRY.finish_job(False, "bạn đã bấm dừng")
-        self.log.append_log("Đã dừng theo yêu cầu của bạn.", 30)
+        self.log.append_log("Đã dừng theo yêu cầu của bạn.", _log.WARNING)
         TOASTS.info("Đã dừng tải. Những video tải xong vẫn còn trên máy.")
 
     # -- Bảng ----------------------------------------------------------

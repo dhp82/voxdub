@@ -1,98 +1,165 @@
-# VoxDub Studio — Lồng tiếng video sang tiếng Việt tự động
+# VoxDub Studio
 
-Ứng dụng desktop (Windows) tự động lồng tiếng video **YouTube / TikTok / Douyin / Bilibili / file trên máy** sang **tiếng Việt**, giữ nguyên nhạc nền và hiệu ứng âm thanh gốc. Kèm phụ đề, che mờ chữ Trung trên hình, và trình chỉnh sửa từng câu.
+**Lồng tiếng Việt cho video nước ngoài — tự động, chạy trên máy bạn, miễn phí.**
 
-**Miễn phí 100%** với cấu hình mặc định: nhận dạng giọng nói chạy trên máy (Whisper), giọng đọc tiếng Việt chạy trên máy (VieNeu — hàng chục giọng nam/nữ ba miền, thêm được giọng riêng từ đoạn ghi âm), dịch bằng AI qua API key miễn phí (OpenRouter/Gemini).
+Ứng dụng desktop cho Windows. Dán link YouTube / TikTok / Douyin / Bilibili (hoặc chọn file trên máy), chọn giọng đọc, bấm chạy — nhận về video đã lồng tiếng Việt, **giữ nguyên nhạc nền và hiệu ứng âm thanh gốc**, kèm phụ đề và trình chỉnh sửa từng câu.
+
+Nghe-chép, lồng tiếng, phụ đề, xuất video đều **chạy offline trên máy bạn**, không cần API key, không gửi video đi đâu.
 
 ```
-Link/File video → Tải về → Tách âm thanh → Tách nhạc nền
-                → Nghe lời thoại gốc (Whisper)
-                → Dịch sang tiếng Việt (AI)
-                → Tạo giọng đọc (VieNeu ~1s/câu trên CPU)
-                → Khớp thời gian → Trộn với nhạc nền
-                → Phụ đề + che chữ gốc → Xuất video hoàn chỉnh
+Link / File video
+   ├─► Tải về  ──►  Tách âm thanh  ──►  Tách nhạc nền (Demucs)
+   │                       │
+   │                       └──►  Nghe-chép lời gốc (Whisper / Paraformer)
+   │                                     │
+   │                                     └──►  Dịch sang tiếng Việt
+   │                                                  │
+   │                                                  └──►  Đọc thành giọng Việt (VieNeu)
+   │                                                              │
+   └───────────────────────────────────────────►  Khớp thời gian  ┘
+                                                        │
+                                    Trộn nhạc nền + phụ đề + che chữ gốc
+                                                        │
+                                                  dubbed_video.mp4
 ```
 
 ---
 
-## 1. Cài đặt (làm 1 lần)
+## Mục lục
 
-### Bước 1 — Cài Python 3.10+
+1. [Cài đặt trong 5 phút](#1-cài-đặt-trong-5-phút)
+2. [Chạy video đầu tiên](#2-chạy-video-đầu-tiên)
+3. [Bước dịch — hai cách](#3-bước-dịch--hai-cách)
+4. [Hướng dẫn từng trang](#4-hướng-dẫn-từng-trang)
+5. [Kết quả nằm ở đâu](#5-kết-quả-nằm-ở-đâu)
+6. [Cài thêm (không bắt buộc)](#6-cài-thêm-không-bắt-buộc)
+7. [Câu hỏi thường gặp](#7-câu-hỏi-thường-gặp)
+8. [Dành cho lập trình viên](#8-dành-cho-lập-trình-viên)
+9. [Ủng hộ tác giả](#9-ủng-hộ-tác-giả)
 
-Tải tại <https://www.python.org/downloads/> — khi cài **nhớ tick "Add Python to PATH"**.
+---
 
-### Bước 2 — Cài ffmpeg (bản "full")
+## 1. Cài đặt trong 5 phút
 
-1. Tải bản **full** tại <https://www.gyan.dev/ffmpeg/builds/> (file `ffmpeg-release-full.7z`)
-2. Giải nén, chép thư mục `bin` vào PATH (hoặc chép `ffmpeg.exe` + `ffprobe.exe` vào `C:\Windows`)
-3. Kiểm tra: mở Command Prompt gõ `ffmpeg -version` — hiện version là được
+### Bạn cần chuẩn bị 2 thứ
 
-> Cần bản **full** vì có libass để ghi phụ đề vào video. Bản "essentials" cũng có, nhưng full chắc chắn nhất.
+| Cần gì | Tải ở đâu | Lưu ý |
+|---|---|---|
+| **Python 3.10 trở lên** | <https://www.python.org/downloads/> | Khi cài **NHỚ TÍCH ô "Add Python to PATH"** — quên bước này là mọi thứ sau đó không chạy |
+| **ffmpeg (bản full)** | <https://www.gyan.dev/ffmpeg/builds/> — file `ffmpeg-release-full.7z` | Giải nén ra ví dụ `C:\ffmpeg`, rồi thêm `C:\ffmpeg\bin` vào **PATH** của Windows |
 
-### Bước 3 — Cài ứng dụng
+<details>
+<summary><b>Cách thêm ffmpeg vào PATH (bấm để xem)</b></summary>
 
-Mở Command Prompt trong thư mục dự án:
+1. Giải nén file `.7z` vừa tải (dùng [7-Zip](https://www.7-zip.org/) nếu Windows không mở được)
+2. Đổi tên thư mục vừa giải nén thành `ffmpeg`, chép vào ổ `C:\` → được `C:\ffmpeg\bin\ffmpeg.exe`
+3. Bấm phím Windows, gõ **"environment variables"** → mở **"Edit the system environment variables"**
+4. Bấm **Environment Variables…** → ở khung dưới chọn dòng **Path** → **Edit** → **New** → dán `C:\ffmpeg\bin` → **OK** hết
+5. **Mở lại** Command Prompt, gõ `ffmpeg -version`. Hiện ra một đống chữ = xong.
+
+</details>
+
+### Rồi chạy 1 file
+
+Tải mã nguồn về (bấm **Code → Download ZIP** ở trang GitHub, hoặc `git clone`), giải nén, rồi:
+
+> **Đúp chuột vào `cai_dat.bat`**
+
+File này tự làm hết:
+
+| Bước | Nội dung |
+|---|---|
+| 1 | Kiểm tra Python |
+| 2 | Kiểm tra ffmpeg |
+| 3 | Cài thư viện Python (`requirements.txt`) |
+| 4 | Tạo file cấu hình `.env` |
+| 5 | Cài bộ nghe-chép **Whisper** và bộ giọng đọc **VieNeu** |
+
+Lần đầu tải về khoảng **1–2 GB** (model AI) nên hơi lâu. **Chạy lại `cai_dat.bat` lúc nào cũng an toàn** — phần nào đã xong sẽ được bỏ qua, không tải lại.
+
+### Mở ứng dụng
+
+> **Đúp chuột vào `chay_app.bat`**
+
+<details>
+<summary><b>Nếu bạn thích gõ lệnh hơn</b></summary>
 
 ```bash
 pip install -r requirements.txt
-playwright install chromium      # chỉ cần nếu tải video Douyin
-copy .env.example .env           # tạo file cấu hình (chỉnh sau trong Tab Cài đặt)
+copy .env.example .env
+py scripts/setup_whisper.py      # bộ nghe-chép, ~1 GB
+py scripts/setup_vieneu.py       # bộ giọng đọc, ~300 MB
+py -m autodub_gui                # mở app
 ```
-
-### Bước 4 — Chạy
-
-```bash
-python -m autodub_gui
-```
-
-Vậy là xong. Mọi cài đặt còn lại (API dịch, giọng đọc, phụ đề…) đều chỉnh trong **Tab Cài đặt** của app — không cần sửa file gì.
-
----
-
-## 2. Cài AI dịch (API key miễn phí — 2 phút)
-
-Bước dịch cần một AI. Cách nhanh và nhẹ máy nhất là dùng API key miễn phí — không cài thêm gì, không tốn RAM/dung lượng:
-
-1. Lấy key **miễn phí** ở một trong hai nơi:
-   - **OpenRouter**: <https://openrouter.ai/keys> (khuyến nghị — nhiều model miễn phí)
-   - **Google Gemini**: <https://aistudio.google.com/apikey>
-2. Mở **Tab Cài đặt → thẻ Kết nối**, chọn nơi dịch tương ứng, dán key, bấm **Lưu cài đặt**
-
-Từ giờ pipeline tự dịch, chạy một mạch từ link đến video hoàn chỉnh — không cần thao tác gì thêm.
-
-> App cũng hỗ trợ OpenAI / Anthropic / DeepSeek / máy chủ tự chọn — cùng chỗ trong thẻ Kết nối.
-
-<details>
-<summary><b>Nếu không muốn dùng API key — dịch tay hoàn toàn</b></summary>
-
-Bỏ tick **"Bật dịch tự động"** trong Tab Cài đặt. Khi chạy tới bước dịch, app sẽ dừng và hiện hướng dẫn:
-
-1. Mở file `TRANSLATE_PENDING.txt` trong thư mục kết quả (có nút mở sẵn trong app)
-2. Copy đoạn prompt trong đó, dán vào ChatGPT/Gemini web, dán thêm nội dung `transcript_original.json`, gửi
-3. Lưu kết quả AI trả về thành `transcript_vi.json` cùng thư mục
-4. Về app bấm **"Đã dịch xong, tiếp tục"**
 
 </details>
 
 ---
 
-## 3. Hướng dẫn dùng từng Tab
+## 2. Chạy video đầu tiên
 
-### Tab Lồng tiếng — làm 1 video
+1. Mở app → thanh bên trái chọn **Tạo dự án**
+2. **Dán link video** (hoặc bấm chọn file `.mp4` trên máy)
+3. Chọn **ngôn ngữ gốc** của video — tiếng Trung, tiếng Anh, tiếng Hàn…
+4. Chọn **giọng đọc** — bấm nghe thử trước cũng được
+5. Bấm **Bắt đầu lồng tiếng** rồi ngồi chờ
 
-1. Dán **link video** (hoặc chọn **file trên máy**)
-2. Chọn **ngôn ngữ gốc** của video (tiếng Trung, tiếng Anh…)
-3. Chọn **giọng đọc** nam/nữ
-4. Tùy chọn:
-   - **Nhạc nền**: `Demucs` (tách giọng khỏi nhạc, chất lượng cao — mặc định) / `Duck` (giảm nhỏ audio gốc, nhanh) / tắt
-   - **Phụ đề**: không / phụ đề rời (bật tắt được trong trình phát) / **ghi vào video** (luôn hiện, đăng TikTok tốt)
-   - **Phụ đề & che chữ…**: mở khung xem trước trên chính khung hình video — **kéo thả dòng phụ đề** để đặt vị trí, chỉnh cỡ chữ/font/màu/viền thấy ngay kết quả, và **kéo chuột khoanh vùng** chữ Trung cần làm mờ. Một nút, chỉnh hết.
-5. Bấm **Bắt đầu lồng tiếng** — theo dõi tiến trình bên phải
-6. Xong: mở video, mở thư mục, hoặc bấm **"Chỉnh sửa từng câu"** để tinh chỉnh
+Xong, app cho bạn 3 nút: **mở video**, **mở thư mục**, **chỉnh sửa từng câu**.
 
-> **Resume**: nếu chạy dở (mất mạng, tắt app…), chọn *"Resume thư mục đã chạy dở"* và trỏ vào thư mục kết quả — mọi bước đã xong đều được dùng lại, không tốn thời gian chạy lại.
+> **Chạy dở bị tắt giữa chừng?** Không mất gì. Mọi bước đều lưu ra file — vào trang **Dự án**, mở lại dự án đó, app chạy tiếp từ đúng chỗ đã dừng.
 
-### Tab Batch — làm nhiều video một lượt
+---
+
+## 3. Bước dịch — hai cách
+
+Cả pipeline chạy offline, **trừ bước dịch**. Bạn chọn một trong hai:
+
+### Cách A — Dịch tay (mặc định, không cần cấu hình gì)
+
+Chạy tới bước dịch, app dừng lại và ghi sẵn file `TRANSLATE_PENDING.txt` ngay trong thư mục dự án. File đó là hướng dẫn từng bước, có kèm sẵn lời nhắn viết hoàn chỉnh để gửi cho AI:
+
+1. Bấm nút **Mở hướng dẫn** trong app (mở `TRANSLATE_PENDING.txt` bằng Notepad)
+2. Làm theo 3 bước ghi trong đó: copy `data/transcript_original.json` → dán vào **ChatGPT / Gemini** cùng lời nhắn có sẵn → lưu kết quả thành `data/transcript_vi.json`
+3. Quay lại app bấm **Đã dịch xong, tiếp tục**
+
+Miễn phí, không giới hạn, chất lượng tuỳ AI bạn dùng.
+
+### Cách B — Dịch tự động (cần tự dựng máy chủ)
+
+Thư mục `control_server/` chứa sẵn một backend Node.js làm việc dịch. Dựng theo `control_server/README.md`, rồi điền địa chỉ vào `.env`:
+
+```ini
+VOXDUB_API_URL=http://localhost:3001
+```
+
+Từ đó pipeline chạy một mạch từ link tới video hoàn chỉnh, không cần thao tác tay.
+
+> Để **trống** `VOXDUB_API_URL` = chạy thuần trên máy. App tự ẩn mọi thứ liên quan tới máy chủ và dùng Cách A.
+
+### Dịch chuẩn hơn — điền ngữ cảnh video
+
+Trang **Dịch thuật** trên thanh bên có mấy ô giúp bản dịch bám sát video hơn (áp dụng cho cả hai cách):
+
+| Ô | Ví dụ |
+|---|---|
+| Chủ đề | `review công nghệ`, `phim cổ trang`, `vlog ẩm thực` |
+| Xưng hô | `mình – các bạn`, `tôi – anh em`, `huynh – muội` |
+| Thuật ngữ cố định | `内卷 = nội quyển`, mỗi dòng một cặp |
+| Ghi chú văn phong | `giọng trẻ trung, nhiều tiếng lóng` |
+
+---
+
+## 4. Hướng dẫn từng trang
+
+### Tạo dự án — làm 1 video
+
+Ngoài link và giọng đọc, các tuỳ chọn đáng chú ý:
+
+- **Nhạc nền**: `Demucs` tách hẳn giọng khỏi nhạc (chất lượng cao nhất, mặc định) — hoặc `Duck` giảm nhỏ tiếng gốc khi có giọng đọc (nhanh hơn nhiều)
+- **Phụ đề**: không / **rời** (file `.srt`, bật tắt được trong trình phát) / **ghi thẳng vào hình** (luôn hiện, hợp đăng TikTok)
+- **Phụ đề & che chữ…**: mở khung xem trước ngay trên khung hình video — **kéo thả** dòng phụ đề để đặt vị trí, chỉnh font/cỡ/màu/viền thấy ngay, và **khoanh vùng bằng chuột** để che mờ chữ Trung trên hình
+
+### Xử lý hàng loạt — nhiều video một lượt
 
 Dán link vào ô, **mỗi dòng một video**:
 
@@ -100,139 +167,199 @@ Dán link vào ô, **mỗi dòng một video**:
 https://youtu.be/abc123
 https://youtu.be/def456 | nữ
 https://www.douyin.com/video/789 | nam
-# dòng bắt đầu bằng # là ghi chú, được bỏ qua
+# dòng bắt đầu bằng # là ghi chú, bỏ qua
 ```
 
-- Giọng đọc, ngôn ngữ gốc… chọn một lần cho cả loạt; muốn video nào giọng khác thì thêm `| nam` hoặc `| nữ` cuối dòng
-- **Tiến độ tự lưu** (`batch_state.json`): tắt app mở lại, dán lại danh sách cũ — video đã xong tự bỏ qua, chỉ chạy phần còn thiếu
-- Tick *"Chạy lại cả video đã xong"* nếu muốn làm lại từ đầu
+- Giọng đọc và ngôn ngữ chọn một lần cho cả loạt; muốn video nào khác giọng thì thêm `| nam` hoặc `| nữ` ở cuối dòng
+- **Tiến độ tự lưu** vào `batch_state.json` — tắt app mở lại, dán lại danh sách cũ, video đã xong tự bỏ qua
 
-### Tab Download — chỉ tải video, không lồng tiếng
+### Trình chỉnh sửa — sửa từng câu
 
-Dán nhiều link, bấm tải. Hỗ trợ cookies trình duyệt cho video cần đăng nhập.
+- Bảng liệt kê từng câu, bản gốc và bản dịch cạnh nhau
+- Bấm **▶** nghe thử câu đó; **nhấp đôi** vào ô bản dịch để sửa
+- Sửa bao nhiêu câu tuỳ thích rồi bấm **Lưu tất cả và đọc lại** một lần — app chỉ đọc lại đúng những câu đã sửa
+- Bấm **Xuất video** khi ưng. Cạnh đó có sẵn nút tải riêng file `.SRT`, `.ASS` hoặc MP3 lồng tiếng.
 
-### Tab Chỉnh sửa — sửa từng câu sau khi lồng
+### Giọng đọc AI
 
-1. **Bước 1**: mở thư mục kết quả (từ Tab Lồng tiếng bấm "Chỉnh sửa từng câu" là vào thẳng)
-2. **Bước 2**: bảng liệt kê từng câu — bản gốc và bản dịch cạnh nhau
-   - Bấm **▶** để nghe giọng đọc của câu đó
-   - **Nhấp đôi** vào ô "Bản dịch" để sửa; sửa thoải mái nhiều câu
-   - Bấm **"Lưu tất cả + đọc lại"** một lần — app lưu mọi câu đã sửa và chỉ đọc lại đúng những câu đó (nhanh)
-   - Bấm **"Hoàn tác"** nếu muốn bỏ thay đổi chưa lưu
-3. **Bước 3**: bấm **"Xuất lại video"** — trộn audio + phụ đề + che chữ, ra video mới. Nút **"Phụ đề & che chữ…"** ngay cạnh cho phép đổi kiểu chữ/vị trí/vùng che trước khi xuất.
+Thư viện giọng có bộ lọc theo **giới tính / vùng miền / phong cách**, nút **nghe thử** từng giọng. Repo đi kèm sẵn **120 giọng mẫu** trong `voices/preset_voices_vn/`.
 
-### Tab Cài đặt
+**Thêm giọng của riêng bạn:** chọn một file WAV dài 5–10 giây (nói rõ, không nhạc nền), nhập đúng nội dung câu nói trong đó — app tự học và thêm vào thư viện.
 
-Mọi cấu hình một chỗ, lưu là áp dụng ngay:
+> Không dùng tính năng này để giả mạo giọng người khác.
 
-| Thẻ | Nội dung |
+### Phụ đề
+
+Các bộ kiểu dựng sẵn: `clean`, `bold_yellow`, `box`, `tiktok`, `karaoke`, `cinema`. Chỉnh được vị trí, font, cỡ chữ, viền, bóng, nền mờ kiểu CapCut, số chữ mỗi dòng.
+
+Chế độ **karaoke** làm chữ nhảy theo giọng đọc; bật *Khớp mốc chữ thật* để app nghe lại chính giọng vừa tạo và căn chuẩn từng cụm (thêm khoảng 30–60 giây mỗi video).
+
+### Tải xuống
+
+Chỉ tải video về, không lồng tiếng. Dán nhiều link một lượt. Hỗ trợ cookies trình duyệt cho video cần đăng nhập.
+
+### Báo cáo chất lượng
+
+Đọc `quality_report.json` của một dự án: bao nhiêu câu khớp đẹp, câu nào bị nén hoặc dồn trễ, câu nào chồng tiếng. Xem trang này để biết cần sửa tay câu nào.
+
+### Cài đặt
+
+Có một **nút vặn tổng** là `QUALITY_PRESET`: `fast` / `balanced` (khuyên dùng) / `quality`. Chỉnh mục chi tiết nào thì mục đó ghi đè preset.
+
+| Thẻ | Nội dung chính |
 |---|---|
-| Cơ bản | Model Whisper (`medium` cân bằng; `large-v3` chính xác nhất nhưng chậm), thư mục xuất, ngôn ngữ gốc mặc định |
-| Giọng đọc | Thư viện giọng VieNeu: lọc theo giới tính/vùng miền/phong cách, **Nghe thử**, thêm giọng riêng từ đoạn ghi âm |
-| Phụ đề | Chỉnh trực quan bằng nút **"Phụ đề & che chữ…"** ở bước Lồng tiếng/Chỉnh sửa; lựa chọn lưu tự động |
-| Hiệu suất | Số luồng xử lý song song, chất lượng tách nhạc nền |
-| Kết nối | Nơi dịch (OpenRouter/Gemini/OpenAI/Anthropic/DeepSeek/tự chọn) + API key, Google Gemini (tiêu đề/mô tả, tuỳ chọn) |
-| Nâng cao | Hệ số chậm giọng, tốc độ đọc tối đa, căn thời gian |
+| Cơ bản | Model Whisper, bộ nhận dạng, thư mục xuất, ngôn ngữ mặc định, tên hiển thị |
+| Hiệu suất | Số việc chạy song song, số luồng giọng đọc |
+| Nâng cao | Tốc độ video/giọng, ngân sách ký tự mỗi giây, chống chồng tiếng, âm lượng, dọn file trung gian |
 
 ---
 
-## 4. Kết quả nằm ở đâu?
+## 5. Kết quả nằm ở đâu
 
-Mỗi lần chạy tạo một thư mục `output/VN/<thời-gian>_vi/`:
+Mỗi lần chạy tạo một thư mục trong `output/`:
 
 ```
-├── dubbed_video.mp4                ← VIDEO HOÀN CHỈNH (cái bạn cần)
-├── transcript_vi.json/.srt         ← bản dịch + file phụ đề rời
-├── transcript_original.json/.srt   ← văn bản nhận dạng từ video gốc
-├── audio_vi_full.wav               ← audio lồng tiếng hoàn chỉnh
-├── segments/…                      ← giọng đọc từng câu (cache)
-├── timing_guide.json               ← câu nào lệch thời gian cần chỉnh tay
-├── thumbnail_prompts.txt           ← prompt tạo thumbnail (dán vào AI ảnh)
-└── youtube_metadata.json           ← tiêu đề/mô tả/hashtag (nếu có key Gemini)
+output/VN/20260809103000_vi/
+├── dubbed_video.mp4            ← VIDEO HOÀN CHỈNH (thứ bạn cần)
+├── transcript_vi.srt           ← phụ đề tiếng Việt rời
+├── youtube/                    ← tiêu đề, mô tả, hashtag, prompt thumbnail
+└── data/                       ← file kỹ thuật, dùng để chạy tiếp & sửa câu
+    ├── transcript_original.json/.srt   ← lời gốc app nghe được
+    ├── transcript_vi.json              ← bản dịch tiếng Việt
+    ├── original_audio.wav, vocals.wav, no_vocals.wav
+    ├── audio_vi_full.wav               ← toàn bộ giọng đọc đã ghép
+    ├── segments/                       ← giọng đọc từng câu (cache)
+    ├── quality_report.json             ← chấm điểm khớp thời gian
+    └── timing_guide.json               ← liệt kê câu bị lệch, cần sửa tay
 ```
 
-Mọi bước đều **cache theo file** — xoá file nào thì bước đó chạy lại, còn lại giữ nguyên.
+Mọi bước đều **cache theo file**: xoá file nào thì riêng bước đó chạy lại, phần còn lại giữ nguyên.
+
+> Muốn tiết kiệm ổ cứng, bật `AUTO_CLEAN_INTERMEDIATES=true` — nhưng dự án đã dọn thì **không sửa từng câu hay xuất lại được nữa**.
 
 ---
 
-## 5. Câu hỏi thường gặp
+## 6. Cài thêm (không bắt buộc)
 
-**Chạy lần đầu rất lâu?** — Lần đầu Whisper và Demucs phải tải model về (vài GB, một lần duy nhất). Các lần sau nhanh hơn nhiều.
+Mỗi mục là một file `.bat`, đúp chuột là chạy:
 
-**Máy không có GPU có chạy được không?** — Được: Whisper chạy CPU tốt, dịch qua API không tốn tài nguyên máy, giọng đọc VieNeu được thiết kế cho CPU (~1 giây/câu). Có GPU thì Whisper và Demucs tự dùng, nhanh hơn.
+| File | Làm gì | Dung lượng |
+|---|---|---|
+| `cai_them_paraformer.bat` | Bộ nghe tiếng Trung **Paraformer** — chính xác hơn Whisper và nhanh hơn trên CPU. Cài xong app tự dùng cho video tiếng Trung. | ~520 MB |
+| `cai_them_douyin.bat` | Trình duyệt Chromium để tải video **Douyin** thẳng từ link | ~170 MB |
+| `nap_giong_doc.bat` | Nạp 120 giọng mẫu trong `voices/` vào app. Thả thêm file `.wav` vào `voices/custom/` rồi chạy lại để thêm giọng riêng. | — |
 
-**Phụ đề burn bị lỗi "No such filter: subtitles"?** — ffmpeg của bạn thiếu libass. Cài bản **full** từ gyan.dev (bước 1.2), hoặc tạm dùng phụ đề chế độ "rời".
-
-**Giọng đọc bị nhanh/chậm so với hình?** — App tự nén giọng tối đa 1.5x cho khớp. Câu nào vẫn lệch sẽ liệt kê trong `timing_guide.json`; vào Tab Chỉnh sửa viết lại câu đó ngắn gọn hơn rồi xuất lại.
-
-**Dịch xong thấy câu nào chưa ưng?** — Tab Chỉnh sửa → sửa → "Lưu tất cả + đọc lại" → "Xuất lại video". Chỉ mất vài giây mỗi câu.
-
-**Video Douyin không tải được?** — Chạy `playwright install chromium` và thử lại; một số video cần cookies đăng nhập (Tab Download có hỗ trợ).
+Cần GPU NVIDIA để Whisper và Demucs chạy nhanh hơn? App tự phát hiện và dùng, không cần cấu hình gì.
 
 ---
 
-## 5.5. VieNeu — giọng đọc tiếng Việt chạy local (miễn phí)
+## 7. Câu hỏi thường gặp
 
-VieNeu là model TTS tiếng Việt chạy ngay trên CPU (~1 giây/câu), không cần GPU. Cài một lần:
+**Lần đầu chạy rất lâu?**
+Whisper và Demucs phải tải model về (vài GB, **một lần duy nhất**). Từ lần thứ hai trở đi nhanh hơn hẳn.
+
+**Máy không có card đồ hoạ có chạy được không?**
+Được hết. Whisper chạy CPU tốt (chọn model `medium`), giọng đọc VieNeu vốn được thiết kế cho CPU (~1 giây/câu). Có GPU thì tự nhanh hơn.
+
+**Lỗi `No such filter: subtitles` khi ghi phụ đề vào hình?**
+ffmpeg của bạn thiếu libass. Cài lại bản **full** từ gyan.dev, hoặc tạm chuyển phụ đề sang chế độ **rời**.
+
+**Giọng đọc bị chồng lên nhau / nhanh quá?**
+Tiếng Việt thường dài hơn tiếng gốc khoảng 20%. Ba cách xử lý, thử theo thứ tự:
+1. Vào **Trình chỉnh sửa**, viết lại những câu dài cho ngắn gọn hơn
+2. Giảm `TRANSLATE_CPS_BUDGET` (mặc định `12.5`) để bản dịch tự ngắn lại
+3. Đặt `VIDEO_SPEED=0.9` — làm chậm cả video một chút để có thêm chỗ trống
+
+Câu nào bị lệch đều được liệt kê trong `data/timing_guide.json` và trang **Báo cáo chất lượng**.
+
+**Không tải được video Douyin?**
+Chạy `cai_them_douyin.bat`. Một số video vẫn cần cookies đăng nhập — trang **Tải xuống** có hỗ trợ.
+
+**Chạy `cai_dat.bat` bị lỗi giữa chừng?**
+Cứ chạy lại. Script được viết để chạy lại nhiều lần vô hại — phần đã xong sẽ bỏ qua.
+
+**App báo thiếu bộ giọng đọc?**
+Chạy lại `cai_dat.bat` (bước 5), hoặc gõ `py scripts/setup_vieneu.py`.
+
+**Tôi có phải trả tiền gì không?**
+Không. Toàn bộ pipeline chạy trên máy bạn. Chỉ khi bạn tự dựng máy chủ dịch ở [Cách B](#cách-b--dịch-tự-động-cần-tự-dựng-máy-chủ) thì mới phát sinh chi phí API của chính bạn.
+
+---
+
+## 8. Dành cho lập trình viên
+
+### Cấu trúc
+
+```
+autodub/                 # lõi pipeline, không phụ thuộc GUI
+├── pipeline.py          # DubPipeline — chạy đủ các bước, cache theo file
+├── editor.py            # sửa câu / đọc lại / xuất lại
+├── batch.py             # chạy hàng loạt, state crash-safe
+├── config.py            # Settings đọc từ .env, validate lười
+├── workdir.py           # bố cục thư mục dự án (data/, youtube/)
+├── progress.py          # ProgressEvent callback + cancel
+├── media/               # download, audio, video, phụ đề, che chữ, Demucs
+├── speech/              # ASR (Whisper, Paraformer) + TTS (VieNeu, CapCut)
+├── text/                # SRT, karaoke ASS, dịch, TRANSLATE_PENDING.txt
+├── content/             # tiêu đề/mô tả/hashtag + prompt thumbnail
+└── saas_client.py       # cổng duy nhất tới máy chủ dịch (tuỳ chọn)
+
+autodub_gui/             # giao diện PySide6, dark theme
+├── app.py               # MainWindow — thanh bên + các trang
+├── workers.py           # QThread cho từng việc nặng
+├── pages/               # mỗi trang một file
+├── ui/                  # widget dùng chung
+├── video/               # trình phát + timeline
+├── theme.py             # QSS
+└── tokens.py            # design tokens — file DUY NHẤT chứa mã màu
+
+scripts/                 # cài đặt & đóng gói (mỗi script chạy lại được)
+control_server/          # backend Node.js cho bước dịch (tuỳ chọn)
+voices/preset_voices_vn/ # 120 giọng mẫu, đi kèm repo
+tests/                   # 584 test
+```
+
+### Nguyên tắc thiết kế
+
+- **Mỗi thành phần nặng một virtualenv riêng** — `.venv-vieneu` (ONNX, không torch), `.venv-whisper`, `.venv-asr`. Môi trường chính nhẹ, không xung đột phiên bản.
+- **Cache theo file, không theo bộ nhớ** — mọi bước ghi kết quả ra đĩa, nên chạy tiếp sau khi tắt máy là chuyện bình thường.
+- **Máy chủ là tuỳ chọn** — `saas_client.is_configured()` là chốt duy nhất; không cấu hình thì mọi thứ tự rẽ sang chế độ chạy thuần trên máy.
+- **`tokens.py` là nơi duy nhất có mã màu** — không hardcode màu ở chỗ khác.
+
+### Chạy test
 
 ```bash
-py scripts/setup_vieneu.py
+py -m pytest -q
 ```
 
-Lệnh trên tự làm hết: tạo môi trường riêng `.venv-vieneu` (không đụng môi trường chính), tải model và bộ giọng có sẵn, chạy thử. Sau đó chọn giọng trong **Tab Cài đặt → thẻ Giọng đọc** (có nút **Nghe thử** cho từng giọng).
+### Đóng gói `.exe`
 
-**Dùng giọng của riêng bạn:** vào thẻ Giọng đọc → **Thêm giọng từ đoạn ghi âm** — chọn một file WAV 5–10 giây (rõ, không nhạc nền) và nhập nội dung câu nói; app tự học giọng và thêm vào thư viện.
+```bash
+py scripts/build_exe.py
+```
 
-**Lưu ý:** không dùng để giả mạo giọng người khác.
+Góp ý và báo lỗi: <https://github.com/ttthanh2044/voxdub/issues>
 
 ---
 
-## 6. Tính năng đầy đủ
+## 9. Ủng hộ tác giả
 
-- Tải video: Douyin (Playwright), TikTok, YouTube, Bilibili, 1000+ trang qua yt-dlp
-- Nhận dạng giọng nói: **Whisper chạy local** — miễn phí, không cần key (tiếng Trung, Anh…); tự dùng GPU khi có
-- Dịch tự động qua **API key miễn phí** (OpenRouter/Gemini, thêm OpenAI/Anthropic/DeepSeek/tự chọn); tự fallback về dịch tay khi chưa có key
-- Giọng đọc tiếng Việt: **VieNeu chạy local trên CPU** (miễn phí, ~1s/câu) — hàng chục giọng ba miền, thêm được giọng riêng từ đoạn ghi âm
-- Giữ nhạc nền: Demucs tách giọng/nhạc (chạy GPU, song song với nhận dạng giọng nói), hoặc duck âm lượng gốc
-- Tự khớp thời gian từng câu với video (atempo tối đa 1.5x)
-- **Phụ đề** rời hoặc ghi thẳng vào video — tùy chỉnh vị trí, font, cỡ chữ, lề, viền, màu
-- **Che mờ chữ Trung** trên hình — khoanh vùng bằng chuột
-- **Chỉnh sửa từng câu**: nghe, sửa, đọc lại hàng loạt, xuất lại video — tái dùng cache
-- **Batch** nhiều video, mỗi dòng một link, tiến độ lưu tự động, resume an toàn
-- Resume mọi lần chạy dở — không bước nào phải làm lại
-- Sinh tiêu đề/mô tả/hashtag YouTube + prompt thumbnail (Gemini, tuỳ chọn)
+Dự án này miễn phí và mã nguồn mở. Nếu nó giúp ích cho bạn, có thể mời tác giả một ly cà phê:
 
-## Kiến trúc (cho dev)
+| | |
+|---|---|
+| **Ngân hàng** | MB Bank |
+| **Số tài khoản** | `0983832373` |
+| **Chủ tài khoản** | TRAN TAN THANH |
 
-```
-autodub/                 # core pipeline (không phụ thuộc GUI)
-├── pipeline.py          # DubPipeline — chạy đủ 8 bước, cache theo file
-├── editor.py            # sửa câu / đọc lại / xuất lại (Segment Editor)
-├── batch.py             # batch từ danh sách dòng, state crash-safe
-├── config.py            # Settings từ .env, validate lười (ConfigError)
-├── languages.py         # đích VI + map ngôn ngữ nguồn
-├── progress.py          # ProgressEvent callback + cancel (threading.Event)
-├── media/               # download, audio, video, subtitle/blur, Demucs
-├── speech/              # Whisper/Paraformer ASR + TTS VieNeu
-├── text/                # SRT, dịch (OpenRouter/Gemini/OpenAI…), TRANSLATE_PENDING.txt
-└── content/             # metadata YouTube + thumbnail prompts (Gemini)
+Cảm ơn bạn rất nhiều. Một ngôi sao ⭐ trên GitHub cũng đã là động lực lớn.
 
-autodub_gui/             # GUI PySide6 (desktop, dark theme)
-├── app.py               # MainWindow — sidebar + các trang
-├── shell.py             # khung sidebar/header
-├── workers.py           # QThread: dub / batch / download / lưu-đọc-lại / xuất-lại
-├── pages/               # từng trang: home, new_project, batch, download, editor, projects, settings, help
-├── ui/                  # widget dùng chung: buttons, inputs, cards, modal, toast…
-├── video/               # trình phát video + timeline
-├── voice_picker.py      # ô chọn giọng đọc (dùng ở pipeline + cài đặt)
-├── style_dialog.py      # kiểu phụ đề + khoanh vùng che chữ trên frame
-├── widgets.py           # StepTracker, LogPanel, Banner
-├── theme.py             # QSS dark theme
-└── tokens.py            # design tokens (file duy nhất chứa mã màu)
-```
+---
 
-Chạy test: `python -m pytest -q`
+## Giấy phép
 
-## License
+Mã nguồn theo giấy phép **MIT** — xem [LICENSE](LICENSE).
 
-MIT.
+Các model AI mà app tải về (VieNeu, Whisper, Paraformer, Demucs) có giấy phép riêng của từng dự án; kiểm tra trước khi dùng cho mục đích thương mại.
+
+**Xin đừng dùng để giả mạo giọng người khác, hoặc lồng tiếng nội dung vi phạm bản quyền.**

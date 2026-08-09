@@ -23,6 +23,7 @@ from autodub.workdir import data_path
 STATUS_COMPLETED = "completed"
 STATUS_PROCESSING = "processing"
 STATUS_PENDING = "pending"
+STATUS_LOCKED = "locked"          # đã lồng tiếng xong, chờ bấm Xuất video
 STATUS_FAILED = "failed"
 STATUS_QUEUED = "queued"
 
@@ -30,6 +31,7 @@ STATUS_LABELS: dict[str, str] = {
     STATUS_COMPLETED: "Hoàn thành",
     STATUS_PROCESSING: "Đang xử lý",
     STATUS_PENDING: "Chờ dịch",
+    STATUS_LOCKED: "Chờ xuất video",
     STATUS_FAILED: "Lỗi",
     STATUS_QUEUED: "Đang chờ",
 }
@@ -44,7 +46,7 @@ PENDING_MARKER = "TRANSLATE_PENDING.txt"
 _DERIVED_PREFIXES = ("dubbed_", "retimed_", "slowed_")
 _VIDEO_EXTS = (".mp4", ".mkv", ".mov", ".avi", ".webm")
 _WORK_DIR_SUFFIX = "*_vi"
-_INDEX_VERSION = 2
+_INDEX_VERSION = 3         # bump khi đổi cách suy trạng thái (thêm "locked")
 _THUMB_WIDTH = 480
 _THUMB_SEEK_S = 1
 _FFMPEG_TIMEOUT_S = 20
@@ -172,6 +174,9 @@ def _status_of(work_dir: str, running_dir: str) -> str:
         return STATUS_PROCESSING
     if _has_error_marker(work_dir):
         return STATUS_FAILED
+    # Đã lồng tiếng xong nhưng chưa bấm Xuất video — dữ liệu còn khóa.
+    if os.path.isfile(data_path(work_dir, "voxdub_lock.json")):
+        return STATUS_LOCKED
     segments_dir = data_path(work_dir, "segments")
     if os.path.isdir(segments_dir) and os.listdir(segments_dir):
         return STATUS_PROCESSING

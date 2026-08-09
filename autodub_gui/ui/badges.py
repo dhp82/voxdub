@@ -31,6 +31,7 @@ STATUS_KIND: dict[str, str] = {
     "completed": "success",
     "processing": "processing",
     "pending": "warning",
+    "locked": "accent",
     "failed": "error",
     "queued": "neutral",
 }

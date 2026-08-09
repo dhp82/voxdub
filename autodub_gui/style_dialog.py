@@ -26,7 +26,7 @@ from PySide6.QtCore import QPoint, QRect, QRectF, Qt, QThread, Signal
 from PySide6.QtGui import (QColor, QFont, QPainter,
                            QPainterPath, QPen, QPixmap)
 from PySide6.QtWidgets import (
-    QComboBox, QDialog, QFormLayout, QHBoxLayout,
+    QCheckBox, QComboBox, QDialog, QFormLayout, QHBoxLayout,
     QLabel, QPushButton, QSpinBox, QVBoxLayout, QWidget,
 )
 
@@ -42,6 +42,8 @@ PREVIEW_TEXT = "Xin chào, đây là phụ đề xem trước"
 PREVIEW_TEXT_KARAOKE = "đây là phụ đề"
 
 _POSITIONS = [("Dưới", "bottom"), ("Giữa", "middle"), ("Trên", "top")]
+
+_BOXES = [("Không", "none"), ("Khối nền sau chữ", "box")]
 
 _DISPLAYS = [("Cả câu", "sentence"),
              ("Cụm chữ theo giọng đọc", "karaoke")]
@@ -273,10 +275,12 @@ class _FrameCanvas(QWidget):
 
         font = QFont(s.get("font", "Arial"))
         font.setPixelSize(max(6, round(int(s.get("font_size", 22)) * scale)))
-        font.setBold(True)
+        font.setBold(bool(s.get("bold", True)))
 
         preview = (PREVIEW_TEXT_KARAOKE
                    if s.get("display") == "karaoke" else PREVIEW_TEXT)
+        if s.get("all_caps"):
+            preview = preview.upper()
         path = QPainterPath()
         path.addText(0, 0, font, preview)
         bounds = path.boundingRect()
@@ -294,8 +298,29 @@ class _FrameCanvas(QWidget):
         path.translate(dx, dy)
         self._text_rect = path.boundingRect()
 
+        # Khối nền sau chữ (BorderStyle=4 của libass): vẽ TRƯỚC chữ, chừa
+        # đệm quanh chữ như libass chừa theo Outline.
+        if s.get("box") == "box":
+            pad = max(4.0, int(s.get("outline", 2)) * scale * 2)
+            box_rect = self._text_rect.adjusted(-pad, -pad, pad, pad)
+            box_color = QColor(s.get("box_color", tokens.SUBTITLE_BOXFILL_DEFAULT))
+            opacity = int(s.get("box_opacity", 60))
+            box_color.setAlpha(round(255 * max(0, min(opacity, 100)) / 100))
+            painter.setPen(Qt.NoPen)
+            painter.fillRect(box_rect, box_color)
+
+        # Bóng đổ: libass dịch chữ màu viền xuống dưới-phải Shadow điểm ảnh.
+        shadow_px = int(s.get("shadow", 0)) * scale
+        if shadow_px > 0 and s.get("box") != "box":
+            sh = QPainterPath(path)
+            sh.translate(shadow_px, shadow_px)
+            shadow_color = QColor(s.get("outline_color", tokens.SUBTITLE_OUTLINE_DEFAULT))
+            shadow_color.setAlpha(160)
+            painter.setPen(Qt.NoPen)
+            painter.fillPath(sh, shadow_color)
+
         outline_px = int(s.get("outline", 2)) * scale * 2
-        if outline_px > 0:
+        if outline_px > 0 and s.get("box") != "box":
             painter.setPen(QPen(QColor(s.get("outline_color", tokens.SUBTITLE_OUTLINE_DEFAULT)),
                                 outline_px, Qt.SolidLine, Qt.RoundCap,
                                 Qt.RoundJoin))
@@ -356,6 +381,9 @@ class StyleDialog(QDialog):
         # Bắt đầu bằng placeholder — frame thật sẽ thay thế sau khi ffmpeg
         # chạy xong trong luồng nền. Người dùng thấy dialog ngay lập tức
         # thay vì phải chờ ffmpeg (có thể mất 2-5 giây trên file lớn).
+        # Cho phép vẽ vùng che CẢ KHI chưa có video (chỉ có URL): tọa độ
+        # được chuẩn hóa 0..1 theo khung hình, nên vùng vẽ trên placeholder
+        # 16:9 áp đúng lên video thật khi pipeline tải về.
         pixmap = _placeholder_frame()
 
         root = QVBoxLayout(self)
@@ -368,14 +396,15 @@ class StyleDialog(QDialog):
         # --- Left: canvas (7 phần) ---
         left = QVBoxLayout()
         left.setSpacing(6)
-        self.canvas = _FrameCanvas(pixmap, self._style, allow_regions=has_video)
+        # allow_regions luôn True — placeholder đủ để khoanh vùng; tọa độ 0..1
+        self.canvas = _FrameCanvas(pixmap, self._style, allow_regions=True)
         self.canvas.on_style_dragged = self._on_canvas_drag
         left.addWidget(self.canvas, 1)
         hint = QLabel(
             "Kéo dòng phụ đề để đặt vị trí. "
-            + ("Kéo chuột trên hình để khoanh vùng che chữ (làm mờ suốt video)."
-               if has_video else
-               "Chọn video trước nếu muốn khoanh vùng che chữ."))
+            "Kéo chuột trên hình để khoanh vùng che chữ (làm mờ suốt video)."
+            + ("" if has_video else
+               " Đang dùng khung mẫu — vùng che sẽ áp đúng lên video khi xử lý."))
         hint.setObjectName("hint")
         hint.setWordWrap(True)
         left.addWidget(hint)
@@ -446,6 +475,17 @@ class StyleDialog(QDialog):
         size_row.addWidget(self.sp_size, 1)
         size_row.addWidget(QLabel("Viền"))
         size_row.addWidget(self.sp_outline, 1)
+        # Chữ đậm + bóng đổ chung một hàng — đủ cặp thông số như Cài đặt.
+        self.chk_bold = QCheckBox("Chữ đậm")
+        self.chk_bold.setToolTip("Chữ đậm dễ đọc hơn khi xem trên điện thoại")
+        self.sp_shadow = QSpinBox()
+        self.sp_shadow.setRange(0, 8)
+        self.sp_shadow.setToolTip("Bóng nhẹ phía sau chữ. Đặt 0 để tắt.")
+        bold_row = QHBoxLayout()
+        bold_row.setSpacing(4)
+        bold_row.addWidget(self.chk_bold, 1)
+        bold_row.addWidget(QLabel("Bóng"))
+        bold_row.addWidget(self.sp_shadow, 1)
         self.btn_color = QPushButton()
         self.btn_color.clicked.connect(lambda: self._pick_color("color"))
         self.btn_outline_color = QPushButton()
@@ -467,10 +507,35 @@ class StyleDialog(QDialog):
         pos_row.addWidget(self.cb_pos, 1)
         pos_row.addWidget(QLabel("Lề"))
         pos_row.addWidget(self.sp_margin, 1)
+        # Nền sau chữ (BorderStyle=4): khối nền mờ giúp đọc trên nền rối.
+        self.cb_box = QComboBox()
+        for label, key in _BOXES:
+            self.cb_box.addItem(label, key)
+        polish_combo(self.cb_box)
+        self.cb_box.setToolTip(
+            "Khối nền mờ sau chữ giúp đọc được trên nền video nhiều chi "
+            "tiết.\nKhi bật nền thì viền và bóng chữ không dùng nữa.")
+        self.btn_box_color = QPushButton()
+        self.btn_box_color.setToolTip("Màu của khối nền sau chữ")
+        self.btn_box_color.clicked.connect(
+            lambda: self._pick_color("box_color"))
+        self.sp_box_opacity = QSpinBox()
+        self.sp_box_opacity.setRange(0, 100)
+        self.sp_box_opacity.setSuffix("%")
+        self.sp_box_opacity.setToolTip(
+            "Độ đục của nền: 0 là trong suốt hẳn, 100 là che kín hoàn toàn")
+        box_row = QHBoxLayout()
+        box_row.setSpacing(4)
+        box_row.addWidget(self.btn_box_color, 1)
+        box_row.addWidget(QLabel("Đục"))
+        box_row.addWidget(self.sp_box_opacity, 1)
         f.addRow("Font:", font_row)
         f.addRow("Cỡ chữ:", size_row)
+        f.addRow("Đậm / bóng:", bold_row)
         f.addRow("Màu / viền:", color_row)
         f.addRow("Vị trí:", pos_row)
+        f.addRow("Nền chữ:", self.cb_box)
+        f.addRow("Màu nền:", box_row)
         # Nhóm 2: cách hiện chữ (cả câu / cụm chữ) + hiệu ứng
         _section("Cách hiện chữ")
         fd = QFormLayout()
@@ -495,6 +560,18 @@ class StyleDialog(QDialog):
             "Số chữ tối đa trên một hàng phụ đề (chế độ Cả câu).\n"
             "Tự động: xuống dòng theo bề rộng màn hình (khuyên dùng).\n"
             "Chọn số nhỏ (4-6) cho video dọc TikTok để chữ không tràn mép.")
+        self.sp_max_lines = QSpinBox()
+        self.sp_max_lines.setRange(1, 4)
+        self.sp_max_lines.setToolTip(
+            "Mỗi lần hiện nhiều nhất bấy nhiêu dòng chữ")
+        lines_row = QHBoxLayout()
+        lines_row.setSpacing(4)
+        lines_row.addWidget(self.sp_line_words, 1)
+        lines_row.addWidget(QLabel("Tối đa"))
+        lines_row.addWidget(self.sp_max_lines, 1)
+        self.chk_all_caps = QCheckBox("Viết hoa toàn bộ")
+        self.chk_all_caps.setToolTip(
+            "Chữ hoa hết nhìn mạnh hơn nhưng đọc chậm hơn, hợp video ngắn")
         self.cb_effect = QComboBox()
         for label, key in _EFFECTS:
             self.cb_effect.addItem(label, key)
@@ -514,7 +591,8 @@ class StyleDialog(QDialog):
         words_row.addWidget(QLabel("Màu nhấn"))
         words_row.addWidget(self.btn_highlight, 1)
         fd.addRow("Hiển thị:", self.cb_display)
-        fd.addRow("Chữ mỗi hàng:", self.sp_line_words)
+        fd.addRow("Chữ mỗi hàng:", lines_row)
+        fd.addRow("", self.chk_all_caps)
         fd.addRow("Hiệu ứng:", self.cb_effect)
         fd.addRow("Chữ mỗi lần:", words_row)
 
@@ -529,9 +607,6 @@ class StyleDialog(QDialog):
         self.btn_clear.clicked.connect(self.canvas.clear_all)
         b.addWidget(self.btn_undo)
         b.addWidget(self.btn_clear)
-        if not has_video:
-            self.btn_undo.setEnabled(False)
-            self.btn_clear.setEnabled(False)
         panel_l.addStretch()
         panel_scroll.setWidget(panel)
         body.addWidget(panel_scroll, 4)
@@ -550,7 +625,7 @@ class StyleDialog(QDialog):
 
         self._load_controls()
         self._connect_controls()
-        if regions and has_video:
+        if regions:
             # Defer until the canvas has its final size, then restore rects.
             from PySide6.QtCore import QTimer
             QTimer.singleShot(
@@ -601,6 +676,8 @@ class StyleDialog(QDialog):
         d_idx = self.cb_display.findData(s.get("display", "sentence"))
         self.cb_display.setCurrentIndex(d_idx if d_idx >= 0 else 0)
         self.sp_line_words.setValue(int(s.get("line_words", 0) or 0))
+        self.sp_max_lines.setValue(int(s.get("max_lines", 2)))
+        self.chk_all_caps.setChecked(bool(s.get("all_caps", False)))
         e_idx = self.cb_effect.findData(s.get("effect", "pop"))
         self.cb_effect.setCurrentIndex(e_idx if e_idx >= 0 else 0)
         self.sp_words.setValue(int(s.get("words_per_cue", 3)))
@@ -612,14 +689,24 @@ class StyleDialog(QDialog):
         self.sp_size.setValue(int(s.get("font_size", 22)))
         self.sp_margin.setValue(int(s.get("margin_v", 40)))
         self.sp_outline.setValue(int(s.get("outline", 2)))
+        self.sp_shadow.setValue(int(s.get("shadow", 0)))
+        self.chk_bold.setChecked(bool(s.get("bold", True)))
+        b_idx = self.cb_box.findData(s.get("box", "none"))
+        self.cb_box.setCurrentIndex(b_idx if b_idx >= 0 else 0)
+        self.sp_box_opacity.setValue(int(s.get("box_opacity", 60)))
+        self._paint_color_button(self.btn_box_color,
+                                 s.get("box_color", tokens.SUBTITLE_BOXFILL_DEFAULT))
         self._paint_color_button(self.btn_color, s.get("color", tokens.SUBTITLE_TEXT_DEFAULT))
         self._paint_color_button(self.btn_outline_color,
                                  s.get("outline_color", tokens.SUBTITLE_OUTLINE_DEFAULT))
         self._update_karaoke_enabled()
+        self._update_box_enabled()
 
     def _connect_controls(self) -> None:
         self.cb_display.currentIndexChanged.connect(self._sync_from_controls)
         self.sp_line_words.valueChanged.connect(self._sync_from_controls)
+        self.sp_max_lines.valueChanged.connect(self._sync_from_controls)
+        self.chk_all_caps.toggled.connect(self._sync_from_controls)
         self.cb_effect.currentIndexChanged.connect(self._sync_from_controls)
         self.sp_words.valueChanged.connect(self._sync_from_controls)
         self.cb_pos.currentIndexChanged.connect(self._sync_from_controls)
@@ -627,6 +714,10 @@ class StyleDialog(QDialog):
         self.sp_size.valueChanged.connect(self._sync_from_controls)
         self.sp_margin.valueChanged.connect(self._sync_from_controls)
         self.sp_outline.valueChanged.connect(self._sync_from_controls)
+        self.sp_shadow.valueChanged.connect(self._sync_from_controls)
+        self.chk_bold.toggled.connect(self._sync_from_controls)
+        self.cb_box.currentIndexChanged.connect(self._sync_from_controls)
+        self.sp_box_opacity.valueChanged.connect(self._sync_from_controls)
 
     def _update_karaoke_enabled(self) -> None:
         karaoke = self.cb_display.currentData() == "karaoke"
@@ -634,14 +725,27 @@ class StyleDialog(QDialog):
         self.sp_words.setEnabled(karaoke)
         # "Chữ mỗi hàng" là của chế độ CẢ CÂU — karaoke tự chia cụm riêng.
         self.sp_line_words.setEnabled(not karaoke)
+        self.sp_max_lines.setEnabled(not karaoke)
         self.btn_highlight.setEnabled(
             karaoke and self.cb_effect.currentData() == "karaoke")
+
+    def _update_box_enabled(self) -> None:
+        """Nền chữ bật thì màu nền/độ đục dùng được; viền + bóng thì không
+        (libass BorderStyle=4 bỏ qua Outline/Shadow khi có khối nền)."""
+        boxed = self.cb_box.currentData() == "box"
+        self.btn_box_color.setEnabled(boxed)
+        self.sp_box_opacity.setEnabled(boxed)
+        self.sp_outline.setEnabled(not boxed)
+        self.sp_shadow.setEnabled(not boxed)
+        self.btn_outline_color.setEnabled(not boxed)
 
     def _sync_from_controls(self, *_args) -> None:
         font = self.cb_font.currentData()
         self._style.update({
             "display": self.cb_display.currentData(),
             "line_words": self.sp_line_words.value(),
+            "max_lines": self.sp_max_lines.value(),
+            "all_caps": self.chk_all_caps.isChecked(),
             "effect": self.cb_effect.currentData(),
             "words_per_cue": self.sp_words.value(),
             "position": self.cb_pos.currentData(),
@@ -649,9 +753,14 @@ class StyleDialog(QDialog):
             "font_size": self.sp_size.value(),
             "margin_v": self.sp_margin.value(),
             "outline": self.sp_outline.value(),
+            "shadow": self.sp_shadow.value(),
+            "bold": self.chk_bold.isChecked(),
+            "box": self.cb_box.currentData(),
+            "box_opacity": self.sp_box_opacity.value(),
         })
         self.sp_margin.setEnabled(self._style["position"] != "middle")
         self._update_karaoke_enabled()
+        self._update_box_enabled()
         self.canvas.set_style(self._style)
 
     def _on_canvas_drag(self, position: str, margin_v: int) -> None:
@@ -676,7 +785,7 @@ class StyleDialog(QDialog):
         luminance = 0.299 * c.red() + 0.587 * c.green() + 0.114 * c.blue()
         btn.setStyleSheet(
             f"background: {hex_color}; color: "
-            f"{'#000' if luminance > 140 else '#fff'};")
+            f"{tokens.BG_APP if luminance > 140 else tokens.TEXT_ON_ACCENT};")
 
     def _populate_fonts(self) -> None:
         """Đổ danh sách phông chữ, CHỈ lấy từ thư mục phông của dự án.
@@ -757,6 +866,7 @@ class StyleDialog(QDialog):
         from PySide6.QtWidgets import QColorDialog
         defaults = {"color": tokens.SUBTITLE_TEXT_DEFAULT,
                     "outline_color": tokens.SUBTITLE_OUTLINE_DEFAULT,
+                    "box_color": tokens.SUBTITLE_BOXFILL_DEFAULT,
                     "highlight_color": tokens.SUBTITLE_HIGHLIGHT_DEFAULT}
         current = self._style.get(key, defaults.get(key, tokens.SUBTITLE_TEXT_DEFAULT))
         color = QColorDialog.getColor(QColor(current), self, "Chọn màu")
@@ -766,6 +876,7 @@ class StyleDialog(QDialog):
         self._style[key] = hex_color
         btn = {"color": self.btn_color,
                "outline_color": self.btn_outline_color,
+               "box_color": self.btn_box_color,
                "highlight_color": self.btn_highlight}[key]
         self._paint_color_button(btn, hex_color)
         self.canvas.set_style(self._style)

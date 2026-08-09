@@ -5,7 +5,9 @@ Màu lấy từ bảng màu tối của ứng dụng để mọi nơi trông nh�
 """
 from __future__ import annotations
 
-from PySide6.QtCore import QPointF, QRectF, Qt
+import os
+
+from PySide6.QtCore import QLineF, QPointF, QRectF, Qt
 from PySide6.QtGui import QColor, QIcon, QPainter, QPainterPath, QPen, QPixmap
 
 from autodub_gui import theme, tokens
@@ -24,6 +26,34 @@ def _make_icon(draw_fn, color: str | QColor) -> QIcon:
     draw_fn(p, r, QColor(color))
     p.end()
     return QIcon(px)
+
+
+def nav_icon(icon_fn, normal: str | None = None,
+             selected: str | None = None) -> QIcon:
+    """Biểu tượng hai trạng thái cho mục điều hướng.
+
+    Trạng thái thường vẽ màu chữ phụ; khi hàng được chọn, item view của Qt
+    tự dùng pixmap ở chế độ Selected — vẽ màu chàm để khớp pill sáng.
+    """
+    icon = icon_fn(normal or tokens.TEXT_SECONDARY)
+    sel = icon_fn(selected or tokens.PRIMARY)
+    px = sel.pixmap(_ICON_SIZE, _ICON_SIZE)
+    icon.addPixmap(px, QIcon.Mode.Selected)
+    return icon
+
+
+def app_logo(size: int = 32) -> QPixmap:
+    """Biểu trưng ứng dụng lấy từ logo.ico; thiếu tệp thì vẽ tay."""
+    try:
+        from autodub.utils import bundled_file
+        path = bundled_file("logo.ico")
+        if path and os.path.exists(path):
+            px = QIcon(str(path)).pixmap(size, size)
+            if not px.isNull():
+                return px
+    except Exception:
+        pass
+    return brand_logo(size)
 
 
 # ---- Các hàm vẽ biểu tượng ----
@@ -800,7 +830,59 @@ def user(color: str | None = None) -> QIcon:
     return _make_icon(_draw_user, color or theme.TEXT_MUTED)
 
 
-def brand_logo(size: int = 32) -> QPixmap:
+def _draw_chart_bar(p: QPainter, r: QRectF, c: QColor) -> None:
+    """Biểu đồ cột — 3 cột cao thấp khác nhau."""
+    p.setPen(Qt.PenStyle.NoPen)
+    p.setBrush(c)
+    cw = r.width() * 0.22   # chiều rộng mỗi cột
+    gap = r.width() * 0.07  # khoảng cách giữa cột
+    # Cột 1 (50%)
+    h1 = r.height() * 0.50
+    p.drawRect(QRectF(r.left(), r.bottom() - h1, cw, h1))
+    # Cột 2 (80%)
+    h2 = r.height() * 0.80
+    p.drawRect(QRectF(r.left() + cw + gap, r.bottom() - h2, cw, h2))
+    # Cột 3 (60%)
+    h3 = r.height() * 0.60
+    p.drawRect(QRectF(r.left() + (cw + gap) * 2, r.bottom() - h3, cw, h3))
+
+
+def chart_bar(color: str | None = None) -> QIcon:
+    return _make_icon(_draw_chart_bar, color or theme.TEXT_MUTED)
+
+
+def _draw_eye(p: QPainter, r: QRectF, c: QColor) -> None:
+    """Icon mắt (eye) — hiện track."""
+    p.setPen(Qt.PenStyle.NoPen)
+    p.setBrush(c)
+    cx, cy = r.center().x(), r.center().y()
+    # Hình ellipse mắt
+    eye_path = QPainterPath()
+    eye_path.moveTo(cx - 9, cy)
+    eye_path.quadTo(cx - 9, cy - 5, cx, cy - 6)
+    eye_path.quadTo(cx + 9, cy - 5, cx + 9, cy)
+    eye_path.quadTo(cx + 9, cy + 5, cx, cy + 6)
+    eye_path.quadTo(cx - 9, cy + 5, cx - 9, cy)
+    p.drawPath(eye_path)
+    # Con ngươi (pupil)
+    p.drawEllipse(QPointF(cx, cy), 3, 3)
+
+
+def _draw_eye_off(p: QPainter, r: QRectF, c: QColor) -> None:
+    """Icon mắt có gạch chéo (eye-off) — ẩn track."""
+    _draw_eye(p, r, c)
+    # Gạch chéo qua mắt
+    p.setPen(QPen(c, 1.8))
+    cx, cy = r.center().x(), r.center().y()
+    p.drawLine(QLineF(cx - 10, cy - 8, cx + 10, cy + 8))
+
+
+def eye(color: str | None = None) -> QIcon:
+    return _make_icon(_draw_eye, color or tokens.TEXT_SECONDARY)
+
+
+def eye_off(color: str | None = None) -> QIcon:
+    return _make_icon(_draw_eye_off, color or tokens.TEXT_SECONDARY)
     """Biểu trưng VoxDub: ô vuông bo góc và bốn vạch sóng âm."""
     px = QPixmap(size, size)
     px.fill(Qt.GlobalColor.transparent)

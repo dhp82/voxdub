@@ -23,7 +23,7 @@ from autodub_gui.ui.buttons import GhostButton, IconButton
 from autodub_gui.ui.cards import SystemStatusCard
 from autodub_gui.ui.effects import soft_shadow
 from autodub_gui.ui.labels import ElidedLabel
-from autodub_gui.ui.style import clear_background, panel_background
+from autodub_gui.ui.style import clear_background, scoped_style
 
 BRAND_NAME = "VoxDub Studio"
 
@@ -36,13 +36,6 @@ _POPUP_MAX_H = 420
 _POPUP_SHADOW_PAD = tokens.SHADOW_BLUR + tokens.SHADOW_Y
 _BADGE_H = 14
 _DIVIDER_MARGIN = 16
-
-# Nhóm CÔNG CỤ: lối tắt vào từng tab Cài đặt, không phải trang riêng.
-_TOOL_ITEMS: list[tuple[str, str, object]] = [
-    ("voice", "Giọng đọc AI", icons.user),
-    ("translate", "Dịch thuật", icons.globe),
-    ("subtitle", "Phụ đề", icons.captions),
-]
 
 # Màu chấm đứng đầu mỗi dòng trong cửa sổ thông báo
 _LEVEL_COLOR = {
@@ -83,17 +76,20 @@ class Sidebar(QFrame):
     """Thanh bên trái: biểu trưng, các nhóm mục, thẻ trạng thái và phiên bản."""
 
     page_requested = Signal(int)
-    tool_selected = Signal(str)        # key công cụ: voice / translate / subtitle
     settings_requested = Signal()
     account_requested = Signal()
 
     def __init__(self, main_items: list[tuple[int, str, object]],
+                 tool_items: list[tuple[int, str, object]],
                  second_items: list[tuple[int, str, object]],
                  version: str, parent: QWidget | None = None):
         super().__init__(parent)
-        panel_background(self, tokens.BG_SIDEBAR)
+        scoped_style(self, f"background: {tokens.BG_SIDEBAR}; "
+                           f"border: none; "
+                           f"border-right: 1px solid {tokens.BORDER_SUBTLE};")
         self._icon_only = False
         self._main_items = main_items
+        self._tool_items = tool_items
         self._second_items = second_items
 
         root = QVBoxLayout(self)
@@ -103,9 +99,7 @@ class Sidebar(QFrame):
         root.addWidget(self._build_brand())
         root.addSpacing(tokens.SP_3)
         self.nav = self._build_list(main_items, "nav")
-        self.nav_tools = self._build_list(
-            [(-1, label, icon_fn) for _key, label, icon_fn in _TOOL_ITEMS],
-            "nav2")
+        self.nav_tools = self._build_list(tool_items, "nav2")
         self.nav2 = self._build_list(second_items, "nav2")
         root.addWidget(self.nav)
         root.addSpacing(tokens.SP_2)
@@ -153,7 +147,7 @@ class Sidebar(QFrame):
                                _DIVIDER_MARGIN, tokens.SP_2)
         row.setSpacing(tokens.SP_2)
         self._logo = QLabel()
-        self._logo.setPixmap(icons.brand_logo(_LOGO_PX))
+        self._logo.setPixmap(icons.app_logo(_LOGO_PX))
         clear_background(self._logo)
         self._brand_name = ElidedLabel(BRAND_NAME)
         self._brand_name.setStyleSheet(
@@ -175,7 +169,7 @@ class Sidebar(QFrame):
         widget.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         for _row, label, icon_fn in items:
             item = QListWidgetItem(f"  {label}")
-            item.setIcon(icon_fn(tokens.TEXT_SECONDARY))
+            item.setIcon(icons.nav_icon(icon_fn))
             item.setToolTip(label)
             widget.addItem(item)
         height = tokens.NAV_ITEM_H * len(items) + tokens.SP_2 * len(items)
@@ -238,7 +232,7 @@ class Sidebar(QFrame):
         if index < 0:
             return
         self._clear_selection(self.nav, self.nav2)
-        self.tool_selected.emit(_TOOL_ITEMS[index][0])
+        self.page_requested.emit(self._tool_items[index][0])
 
     def _on_second_row(self, index: int) -> None:
         if index < 0:
@@ -248,8 +242,8 @@ class Sidebar(QFrame):
 
     def select_row(self, row: int) -> None:
         """Tô sáng mục tương ứng với trang đang mở, không phát tín hiệu lại."""
-        self._clear_selection(self.nav_tools)
         for widget, items in ((self.nav, self._main_items),
+                              (self.nav_tools, self._tool_items),
                               (self.nav2, self._second_items)):
             widget.blockSignals(True)
             match = next((i for i, it in enumerate(items) if it[0] == row), -1)
@@ -300,10 +294,8 @@ class Sidebar(QFrame):
         self._version.setVisible(not icon_only)
         self._tools_label.setVisible(not icon_only)
         self._system_label.setVisible(not icon_only)
-        tool_items = [(-1, label, icon_fn)
-                      for _key, label, icon_fn in _TOOL_ITEMS]
         for widget, items in ((self.nav, self._main_items),
-                              (self.nav_tools, tool_items),
+                              (self.nav_tools, self._tool_items),
                               (self.nav2, self._second_items)):
             for i, (_row, label, _icon) in enumerate(items):
                 item = widget.item(i)
@@ -325,6 +317,8 @@ class NotificationPopup(QFrame):
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setWindowFlag(Qt.WindowType.FramelessWindowHint, True)
         self.setFixedWidth(_POPUP_W + 2 * _POPUP_SHADOW_PAD)
+        # Outer frame phải transparent hoàn toàn (không background của QFrame)
+        self.setStyleSheet("NotificationPopup { background: transparent; border: none; }")
 
         # Bóng đổ phải nằm GỌN trong cửa sổ: đổ lên tấm panel bên trong và
         # chừa viền trong suốt xung quanh. Đổ bóng thẳng lên cửa sổ sẽ vẽ
@@ -588,6 +582,12 @@ class AppHeader(QFrame):
         self._actions.setSpacing(tokens.SP_2)
         row.addLayout(self._actions)
 
+        # Chỗ gắn widget hiện ở MỌI trang (huy hiệu Vox) — tách khỏi
+        # ``_actions`` vì chỗ kia bị xóa sạch mỗi lần chuyển trang.
+        self._persistent = QHBoxLayout()
+        self._persistent.setSpacing(tokens.SP_2)
+        row.addLayout(self._persistent)
+
         self.bell = NotificationButton()
         self.bell.clicked.connect(self.notifications_clicked.emit)
         row.addWidget(self.bell)
@@ -601,6 +601,10 @@ class AppHeader(QFrame):
         """Đổi tên trang và dòng mô tả bên dưới."""
         self.title.setText(title)
         self.subtitle.setText(subtitle)
+
+    def set_persistent(self, widget: QWidget) -> None:
+        """Gắn một widget hiện ở mọi trang (gọi một lần lúc dựng cửa sổ)."""
+        self._persistent.addWidget(widget)
 
     def set_actions(self, widgets: list[QWidget]) -> None:
         """Thay các nút riêng của trang (gọi mỗi lần chuyển trang)."""

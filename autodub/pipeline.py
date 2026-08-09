@@ -35,6 +35,15 @@ from autodub.workdir import data_dir, data_path, youtube_dir
 logger = setup_logging("autodub.pipeline")
 
 
+class _PostTarget:
+    """Nhãn dùng để tính job_id của bước đăng bài (không phải ngôn ngữ đích)."""
+
+    text_field = "post"
+
+
+_POST_TARGET = _PostTarget()
+
+
 def source_video_path(work_dir: str) -> str | None:
     """External source video remembered for this work_dir, if still valid.
 
@@ -56,7 +65,12 @@ def source_video_path(work_dir: str) -> str | None:
 
 
 def _usage_snapshot() -> dict:
-    """Số request/token đã tiêu cho lượt dịch của video này."""
+    """Số Vox đã tiêu cho video này (dịch + phân tích + rà soát + đăng bài).
+
+    Token nằm phía máy chủ và người dùng không trả tiền theo token nữa, nên
+    con số duy nhất có nghĩa với họ là số Vox — ghi vào quality_report.json
+    để đối chiếu với lịch sử ví.
+    """
     from autodub.text.translate_common import USAGE
     return USAGE.snapshot()
 
@@ -80,17 +94,21 @@ class DubRequest:
     # cover hardcoded source captions. Any region forces a video re-encode.
     blur_regions: list[dict] = field(default_factory=list)
     subtitle_style: dict | None = None  # libass styling; None → Settings default
-    #: Nơi dịch riêng cho lần chạy này (xem autodub.config.TRANSLATE_ENGINES).
-    #: None → Settings.translate_engine.
-    translate_engine: str | None = None
 
     # The dub target is always Vietnamese now.
     target: str = "vi"
 
+    #: Luồng wizard: giữ chỗ Vox sau ASR, chạy tới hết ghép audio rồi DỪNG
+    #: (``status="export_pending"``) — file trung gian trả phí nằm trên đĩa
+    #: dưới dạng mã hóa cho tới khi người dùng bấm Xuất video (commit hold).
+    #: Batch/legacy giữ False: trừ Vox theo từng lượt như cũ, không mã hóa.
+    defer_export: bool = False
+
 
 @dataclass
 class DubResult:
-    status: str                        # "completed" | "translate_pending"
+    # "completed" | "translate_pending" | "export_pending" | "credit_blocked"
+    status: str
     work_dir: str
     report: dict = field(default_factory=dict)
 
@@ -105,6 +123,7 @@ class DubPipeline:
         cancel_event: threading.Event | None = None,
         synth_cache=None,
         demucs_cache=None,
+        whisper_cache=None,
     ):
         self.settings = settings
         self._reporter = ProgressReporter(progress, cancel_event)
@@ -115,6 +134,12 @@ class DubPipeline:
         # Optional autodub.media.vocal_separator.DemucsCache — batch runs
         # reuse one loaded Demucs model across videos (caller owns lifecycle).
         self._demucs_cache = demucs_cache
+        # Optional autodub.speech.transcriber.WhisperCache — batch runs reuse
+        # one loaded Whisper model across videos (caller owns lifecycle).
+        self._whisper_cache = whisper_cache
+        # Work dir of the most recent run() call (set even when the run
+        # fails mid-way) — batch uses it to resume the same folder later.
+        self.last_work_dir = ""
 
     def _get_synth(self, target, voice):
         from autodub.speech.tts import get_synthesizer
@@ -130,6 +155,10 @@ class DubPipeline:
         strand multi-GB worker subprocesses (VRAM) between runs."""
         self._active_synth = None
         self._active_bg_future = None
+        self._bg_executor = None
+        # Xoá dấu vết lượt trước — lỡ lượt này đổ TRƯỚC khi chọn xong thư mục
+        # thì batch không nhầm sang thư mục của video trước đó.
+        self.last_work_dir = ""
         try:
             return self._run_impl(req)
         except BaseException:
@@ -149,8 +178,18 @@ class DubPipeline:
                     logger.warning(f"Không đóng được TTS synth khi dọn dẹp: {e}")
             raise
         finally:
+            # Executor được đóng ở đây, không phải ngay sau submit():
+            # shutdown(wait=False) rồi bỏ tham chiếu để lại một luồng đang
+            # chạy mà không ai giữ. Chỉ chờ khi việc nền đã xong — hủy giữa
+            # lúc Demucs còn tách nhạc thì cancel() không cắt được nó, chờ ở
+            # đây sẽ ghim nút Hủy cho tới khi Demucs chạy hết.
+            bg_fut = self._active_bg_future
+            executor = self._bg_executor
             self._active_synth = None
             self._active_bg_future = None
+            self._bg_executor = None
+            if executor is not None:
+                executor.shutdown(wait=bg_fut is None or bg_fut.done())
 
     @staticmethod
     def _log_machine_info(settings: Settings) -> None:
@@ -158,6 +197,7 @@ class DubPipeline:
         video chậm vì máy yếu hay vì lỗi, không phải hỏi lại người dùng."""
         from autodub.sysinfo import available_ram_gb, total_ram_gb
         from autodub.media.vocal_separator import gpu_venv_python
+        from autodub.media.video import video_encoder_name
 
         total = total_ram_gb()
         avail = available_ram_gb()
@@ -168,6 +208,12 @@ class DubPipeline:
             f"Máy: {os.cpu_count() or '?'} nhân, {ram_txt}, GPU (venv) {gpu_txt} — "
             f"TTS {settings.vieneu_max_workers} luồng, "
             f"parallel {settings.parallel_workers}")
+        # Xuất video bằng card đồ họa nhanh gấp nhiều lần CPU. Ghi rõ ở đây để
+        # người dùng máy yếu biết ngay mình đang chạy đường nào.
+        try:
+            logger.info(f"Xuất video bằng: {video_encoder_name()}")
+        except Exception as exc:      # ffmpeg lạ — không đáng làm hỏng lượt chạy
+            logger.debug(f"Không dò được encoder: {exc}")
 
     def _run_impl(self, req: DubRequest) -> DubResult:
         start_time = time.time()
@@ -200,6 +246,9 @@ class DubPipeline:
             folder_name = datetime.now().strftime("%Y%m%d%H%M%S") + target.folder_suffix
             work_dir = ensure_dir(os.path.join(output_dir, folder_name))
             logger.info(f"Output folder: {work_dir}")
+        # Cho caller (batch) biết lượt chạy này nằm ở thư mục nào — kể cả khi
+        # nó đổ giữa chừng, để lần chạy lại truyền resume_dir đúng chỗ.
+        self.last_work_dir = work_dir
 
         # Bố cục thư mục: file kỹ thuật vào data/, kết quả nằm ở gốc.
         # Thư mục cũ (mọi thứ phẳng ở gốc) được data_path tự nhận và giữ nguyên.
@@ -210,7 +259,10 @@ class DubPipeline:
 
         # --- Step 1: Download or use local file ---
         rep.check_cancelled()
-        rep.emit("acquire", "start")
+        # detail = work_dir: báo sớm cho GUI biết thư mục dự án của lượt chạy
+        # này — lỡ có lỗi giữa chừng thì trang Tạo dự án còn biết chỗ mà mời
+        # người dùng chạy tiếp (tránh tạo dự án mới, tránh trừ Vox hai lần).
+        rep.emit("acquire", "start", detail=work_dir)
         logger.info("=" * 60)
         logger.info("STEP 1: Acquiring video")
         if req.url:
@@ -224,24 +276,39 @@ class DubPipeline:
         # --- Step 2: Extract audio ---
         rep.check_cancelled()
         logger.info("=" * 60)
-        if os.path.exists(audio_path) and os.path.getsize(audio_path) > 0:
+        # HQ extract for the background/mix path: 44.1 kHz stereo. The 16 kHz
+        # mono file is what ASR wants, but running Demucs on it crushes the
+        # soundtrack to phone-call bandwidth — the single biggest audio
+        # quality loss of the old pipeline. Failure falls back to the ASR wav.
+        hq_audio_path = data_path(work_dir, "original_audio_hq.wav")
+        have_asr = (os.path.exists(audio_path)
+                    and os.path.getsize(audio_path) > 0)
+        have_hq = (os.path.exists(hq_audio_path)
+                   and os.path.getsize(hq_audio_path) > 0)
+        need_hq = settings.hq_background and not have_hq
+        if have_asr:
             logger.info(f"STEP 2: Reusing existing extracted audio: {audio_path}")
             rep.emit("extract", "skip", detail=audio_path)
         else:
             logger.info("STEP 2: Extracting audio")
             rep.emit("extract", "start")
-            from autodub.media.audio import extract_audio
-            extract_audio(video_path, audio_path, sample_rate=settings.audio_sample_rate)
+            from autodub.media.audio import extract_audio, extract_audio_dual
+            if need_hq:
+                # Cần cả hai bản — một lệnh ffmpeg, video giải mã một lần.
+                try:
+                    extract_audio_dual(video_path, audio_path, hq_audio_path,
+                                       asr_rate=settings.audio_sample_rate)
+                    need_hq = False
+                except Exception as e:
+                    logger.warning(f"Rút audio 1 lượt lỗi ({e}) — "
+                                   "tách thành hai lệnh rời")
+            if not (os.path.exists(audio_path)
+                    and os.path.getsize(audio_path) > 0):
+                extract_audio(video_path, audio_path,
+                              sample_rate=settings.audio_sample_rate)
             rep.emit("extract", "done", detail=audio_path)
-
-        # HQ extract for the background/mix path: 44.1 kHz stereo. The 16 kHz
-        # mono file above is what ASR wants, but running Demucs on it crushes
-        # the soundtrack to phone-call bandwidth — the single biggest audio
-        # quality loss of the old pipeline. Failure falls back to the ASR wav.
-        hq_audio_path = data_path(work_dir, "original_audio_hq.wav")
         if settings.hq_background:
-            if not (os.path.exists(hq_audio_path)
-                    and os.path.getsize(hq_audio_path) > 0):
+            if need_hq:
                 try:
                     from autodub.media.audio import extract_audio
                     extract_audio(video_path, hq_audio_path,
@@ -264,17 +331,25 @@ class DubPipeline:
             self._resolve_background, req.bg_mode, req.bg_duck_db,
             hq_audio_path, work_dir,
         )
-        bg_executor.shutdown(wait=False)
+        # Giữ trên self, shutdown trong finally của run() — xem chú thích ở đó.
+        self._bg_executor = bg_executor
         self._active_bg_future = bg_future
 
-        engine = req.translate_engine or settings.translate_engine
         tts_synth = None
         # Kiểu phụ đề chốt MỘT lần ở đây rồi dùng lại cho mọi bước sinh phụ
         # đề bên dưới — chữ trong tệp .srt và chữ ghi vào hình luôn khớp.
         from autodub.media.subtitle import normalize_style
         from autodub.text.subtitles import refresh_subtitles
+        from autodub.text.translate_common import HOLD
         subtitle_style = normalize_style(req.subtitle_style
                                          or settings.subtitle_style())
+
+        def _refresh_subs(*args, **kwargs):
+            # Hold chưa chốt → không để phụ đề (bản dịch thuần chữ) nằm
+            # thường trên đĩa. Phase Xuất video sinh lại đầy đủ SRT/ASS.
+            if req.defer_export and HOLD.active:
+                return None, None
+            return refresh_subtitles(*args, **kwargs)
 
         # --- Step 3: Speech-to-Text (ASR) — GPU-exclusive ---
         rep.check_cancelled()
@@ -323,7 +398,8 @@ class DubPipeline:
             rep.emit("asr", "start")
             from autodub.speech.transcriber import transcribe, save_transcript
             from autodub.text.srt import generate_srt
-            segments = transcribe(audio_path, lang_code, settings)
+            segments = transcribe(audio_path, lang_code, settings,
+                                  whisper_cache=self._whisper_cache)
             save_transcript(segments, transcript_orig_path)
             generate_srt(segments, data_path(work_dir, "transcript_original.srt"),
                          text_field="text")
@@ -343,6 +419,19 @@ class DubPipeline:
         from autodub.text.translate_hint import annotate_slots
         annotate_slots(segments)
 
+        # --- Giữ chỗ Vox — sau ASR là lúc biết chính xác số câu và thời
+        # lượng. MỌI lượt chạy đều giữ chỗ (wizard lẫn batch) nên giá luôn là
+        # công thức đóng trên số segment. Thiếu Vox thì chặn NGAY TẠI ĐÂY,
+        # trước khi máy chủ tốn một đồng phí AI nào. Khác biệt duy nhất giữa
+        # hai luồng là THỜI ĐIỂM chốt: wizard dừng chờ bấm Xuất video, còn
+        # batch/legacy chốt ngay sau khi xuất xong (xem cuối hàm).
+        video_duration_s = max(float(s.get("end", 0) or 0) for s in segments)
+        blocked = self._setup_hold(segments, target, work_dir,
+                                   video_duration_s)
+        if blocked is not None:
+            bg_future.result()   # kết quả đã cache — lần chạy lại dùng ngay
+            return blocked
+
         # Khởi động sớm bộ giọng: việc nạp model (vài giây trên CPU) nấp sau
         # bước dịch. VieNeu chạy CPU nên không tranh card đồ họa với bất cứ
         # thứ gì — lúc nào cũng khởi động sớm được. Ở đây chỉ NẠP model, còn
@@ -352,7 +441,10 @@ class DubPipeline:
             self._active_synth = tts_synth
             warm = getattr(tts_synth, "warm_up_async", None)
             if warm is not None:
-                bg_future.add_done_callback(lambda _f: warm())
+                # A3 fix: khởi động worker ngay lập tức thay vì chờ Demucs.
+                # VieNeu chạy CPU-only — không tranh VRAM với Demucs (GPU),
+                # nên có thể load song song và tiết kiệm 30-120s chờ đợi.
+                warm()
         except Exception as e:
             logger.warning(f"Bỏ qua khởi động sớm bộ giọng ({e})")
             tts_synth = None
@@ -366,7 +458,7 @@ class DubPipeline:
             logger.info(f"Reusing existing translation: {transcript_dub_path}")
             logger.info("Dùng lại bản dịch đã có — đỡ chờ")
             segments = self._load_translation(transcript_dub_path, segments, target)
-            refresh_subtitles(segments, work_dir, target, subtitle_style)
+            _refresh_subs(segments, work_dir, target, subtitle_style)
             # The hint file is no longer needed once the translation exists
             hint_leftover = os.path.join(work_dir, "TRANSLATE_PENDING.txt")
             if os.path.exists(hint_leftover):
@@ -374,12 +466,18 @@ class DubPipeline:
             rep.emit("translate", "done", detail=transcript_dub_path)
         else:
             translated = self._auto_translate(segments, target,
-                                              req.source_lang, engine,
+                                              req.source_lang,
                                               work_dir=work_dir)
             if translated is None:
+                # Rẽ sang dịch tay. Hold GIỮ NGUYÊN: giá đã chốt và trừ đủ từ
+                # lúc giữ chỗ nên không có gì để hoàn, còn giữ hold thì lượt
+                # chạy lại nhận lại đúng khóa để mở file đã mã hóa. Hướng dẫn
+                # chỉ cần nói rõ là không phát sinh thêm Vox.
+                refund_note = self._money_note_for_manual()
                 from autodub.text.translate_hint import write_hint
                 hint_path = write_hint(work_dir, target, req.source_lang,
-                                       settings=self.settings)
+                                       settings=self.settings,
+                                       refund_note=refund_note)
                 # Dòng info tiếng Anh cho console/dev; warning tiếng Việt là
                 # dòng người dùng thấy trong Nhật ký.
                 logger.info("Translation pending — see TRANSLATE_PENDING.txt in work dir")
@@ -401,8 +499,14 @@ class DubPipeline:
             # run hits the cached branch above (resume-safe, same as manual).
             from autodub.speech.transcriber import save_transcript
             save_transcript(translated, transcript_dub_path)
+            if HOLD.active:
+                # Bản dịch trả phí — mã hóa trên đĩa cho tới khi commit hold.
+                from autodub import securestore
+                securestore.encrypt_file(transcript_dub_path, HOLD.key)
+                securestore.add_locked_file(work_dir, HOLD.hold_id,
+                                            transcript_dub_path)
             segments = self._load_translation(transcript_dub_path, segments, target)
-            refresh_subtitles(segments, work_dir, target, subtitle_style)
+            _refresh_subs(segments, work_dir, target, subtitle_style)
             rep.emit("translate", "done", detail=transcript_dub_path)
 
         # --- Step 5: TTS ---
@@ -453,7 +557,7 @@ class DubPipeline:
                 if req.blur_regions:
                     req.blur_regions = rescale_blur_regions(
                         req.blur_regions, deferred[1])
-                refresh_subtitles(segments, work_dir, target, subtitle_style)
+                _refresh_subs(segments, work_dir, target, subtitle_style)
             else:
                 slowed = apply_video_speed(video_path, background_path,
                                            segments, work_dir, settings)
@@ -467,7 +571,7 @@ class DubPipeline:
                     if req.blur_regions:
                         req.blur_regions = rescale_blur_regions(
                             req.blur_regions, slowed[2])
-                    refresh_subtitles(segments, work_dir, target, subtitle_style)
+                    _refresh_subs(segments, work_dir, target, subtitle_style)
 
         # --- Step 6: voice speed + merge audio ---
         rep.check_cancelled()
@@ -477,18 +581,30 @@ class DubPipeline:
 
         # Hậu kỳ giọng: loudnorm + highpass + fade cho TỪNG clip — mọi giọng
         # ra cùng một mức âm lượng cảm nhận, hết click đầu
-        # câu. Chạy trước voice_speed để atempo nhận clip đã sạch.
+        # câu. VOICE_SPEED (atempo) gộp luôn vào cùng lệnh ffmpeg — mỗi câu
+        # chỉ tốn MỘT tiến trình con thay vì hai.
         merge_src = seg_dir
+        voice_speed = self.settings.voice_speed
+        speed_in_post = (settings.voice_postprocess
+                         and abs(voice_speed - 1.0) >= 0.005)
         if settings.voice_postprocess:
             logger.info("STEP 6a: Voice postprocess (loudnorm, fade, highpass)")
             logger.info("Đang cân chỉnh âm lượng các câu cho đều nhau...")
             from autodub.media.audio import postprocess_voice_clips
+            # Tên thư mục mang hệ số tốc độ — đổi VOICE_SPEED giữa hai lần
+            # chạy thì cache cũ tự bị bỏ qua (resume-safe).
+            post_dir = ("segments_post" if not speed_in_post else
+                        f"segments_post_speed{voice_speed:.2f}".replace(".", "_"))
             merge_src = postprocess_voice_clips(
-                segments, seg_dir, data_path(work_dir, "segments_post"),
+                segments, seg_dir, data_path(work_dir, post_dir),
                 target_lufs=settings.voice_target_lufs,
-                max_workers=min(8, settings.parallel_workers))
+                max_workers=min(8, settings.parallel_workers),
+                speed=voice_speed if speed_in_post else 1.0,
+                on_done=lambda n, t: rep.emit("merge_audio", "progress",
+                                              current=n, total=t))
 
-        merge_dir = self._apply_voice_speed(segments, merge_src, work_dir)
+        merge_dir = (merge_src if speed_in_post
+                     else self._apply_voice_speed(segments, merge_src, work_dir))
 
         # Chống chồng tiếng mềm: đặt lại vị trí clip (ưu tiên DỒN TRỄ vào
         # khoảng lặng — tốc độ đọc mọi câu giữ nguyên; nén nhẹ chỉ khi bất
@@ -500,7 +616,7 @@ class DubPipeline:
             merge_dir, timing_report = apply_soft_timing(
                 segments, merge_dir, data_path(work_dir, "segments_timed"),
                 settings, max_workers=min(8, settings.parallel_workers))
-            refresh_subtitles(segments, work_dir, target, subtitle_style)
+            _refresh_subs(segments, work_dir, target, subtitle_style)
 
         # A long clip may run past the last segment's end — extend the mix
         # so the merge never cuts a clip at the timeline boundary.
@@ -521,6 +637,192 @@ class DubPipeline:
             duck_voice_db=settings.bg_duck_voice_db,
         )
         rep.emit("merge_audio", "done", detail=merged_audio_path)
+
+        # Mọi thứ phase Xuất video cần, gói làm một: luồng batch/legacy dùng
+        # ngay tại chỗ; luồng wizard ghi xuống đĩa (mã hóa) rồi DỪNG — bấm
+        # Xuất video mới commit hold và chạy nốt.
+        export_state = {
+            "video_path": video_path,
+            "merged_audio_path": merged_audio_path,
+            "merge_dir": merge_dir,
+            "deferred_speed": list(deferred_speed) if deferred_speed else None,
+            "segments": segments,
+            "tts_results": tts_results,
+            "timing": (timing_report.to_dict()
+                       if timing_report is not None else {}),
+            "folder_name": folder_name,
+            "lang_code": lang_code,
+            "target": target.key,
+            "audio_path": audio_path,
+            "subtitle_style": subtitle_style,
+            "url": req.url,
+            "skip_video": req.skip_video,
+            "subtitle_mode": req.subtitle_mode,
+            "blur_regions": req.blur_regions,
+            "voice": req.voice,
+            "elapsed_before": round(time.time() - start_time, 1),
+        }
+
+        if req.defer_export and HOLD.active:
+            return self._stop_for_export(export_state, work_dir)
+
+        # Batch/legacy không có nút Xuất video — chốt hold NGAY TẠI ĐÂY (trước
+        # phase xuất, như thứ tự của luồng wizard): mở khóa file trung gian và
+        # ghi tổng Vox vào sổ. HOLD giữ nguyên qua phase xuất để bước tạo nội
+        # dung đăng bài trỏ đúng hold (gói +20 Vox đã nằm trong giá), rồi mới
+        # xả — không rớt sang video kế tiếp của batch.
+        self._settle_hold_inline(work_dir)
+        try:
+            return self._export_phase(export_state, work_dir, target)
+        finally:
+            HOLD.clear()
+
+    def _stop_for_export(self, state: dict, work_dir: str) -> DubResult:
+        """Dừng ở ranh giới Xuất video (luồng wizard, hold còn active).
+
+        Thành quả trả phí (bản dịch đã mã hóa từ trước, audio ghép, trạng
+        thái xuất) nằm trên đĩa dưới dạng mã hóa AES-256-GCM; khóa chỉ có
+        máy chủ giữ bản gốc. Bấm Xuất video → commit hold → nhận khóa →
+        giải mã → :meth:`_export_phase`.
+        """
+        from autodub import securestore
+        from autodub.editor import load_render_opts, save_render_opts
+        from autodub.speech.tts import voices as voice_catalog
+        from autodub.text.translate_common import HOLD
+
+        hold_id, key = HOLD.hold_id, HOLD.key
+
+        # Ghim giọng + tùy chọn render để thẻ dự án hiện đúng thông tin
+        # (Trình chỉnh sửa vẫn khóa cho tới khi xuất).
+        render_opts = load_render_opts(work_dir)
+        render_opts["voice"] = voice_catalog.resolve(self.settings,
+                                                     state.get("voice"))
+        render_opts.setdefault("subtitle_mode", state.get("subtitle_mode"))
+        render_opts.setdefault("blur_regions", state.get("blur_regions"))
+        render_opts.setdefault("subtitle_style", state.get("subtitle_style"))
+        save_render_opts(work_dir, render_opts)
+
+        # Audio ghép + trạng thái xuất: mã hóa rồi ghi vào marker.
+        merged = state["merged_audio_path"]
+        securestore.encrypt_file(merged, key)
+        securestore.add_locked_file(work_dir, hold_id, merged)
+
+        state_path = data_path(work_dir, "export_state.json")
+        securestore.write_json_secure(state, state_path, key)
+        securestore.add_locked_file(work_dir, hold_id, state_path)
+
+        # video_context.json đã mã hóa từ bước phân tích — thêm vào marker
+        # để lúc commit được mở khóa cùng lượt.
+        ctx = data_path(work_dir, "video_context.json")
+        if os.path.exists(ctx) and securestore.is_encrypted(ctx):
+            securestore.add_locked_file(work_dir, hold_id, ctx)
+
+        segments = state["segments"]
+        duration_s = max(float(s.get("end", 0) or 0) for s in segments)
+        usage = _usage_snapshot()
+        # Tổng Vox của video (``estimatedVox``) cho thẻ tổng kết — lấy trượt
+        # cũng không sao, GUI vẫn hiện được số liệu cục bộ.
+        hold_detail = None
+        try:
+            from autodub.saas_client import get_client
+            hold_detail = (get_client().get_hold(hold_id) or {}).get("hold")
+        except Exception:  # noqa: BLE001 — mạng chập chờn thì bỏ qua
+            pass
+        total = int((hold_detail or {}).get("estimatedVox") or usage["vox"] or 0)
+        mins, secs = divmod(int(duration_s), 60)
+        dur_txt = f"{mins} phút {secs} giây" if mins else f"{secs} giây"
+        logger.info("=" * 60)
+        logger.info(
+            f"Đã lồng tiếng xong ({len(segments)} câu, {dur_txt}) — video này "
+            f"tốn {total:,} Vox. Bấm Xuất video để nhận video hoàn chỉnh.")
+        return DubResult(status="export_pending", work_dir=work_dir,
+                         report={
+                             "hold_id": hold_id,
+                             "sentences": len(segments),
+                             "duration_s": round(duration_s, 1),
+                             "usage": usage,
+                             "hold": hold_detail,
+                         })
+
+    def _settle_hold_inline(self, work_dir: str) -> None:
+        """Chốt hold ngay trước phase xuất (luồng batch/legacy).
+
+        Không có nút Xuất video ở luồng này nên chốt tại đây: commit là
+        trung tính về tiền (giá đã trừ đủ lúc giữ chỗ), chỉ để mở khóa các
+        file trung gian đã mã hóa và đóng hold thay vì chờ sweeper 48 giờ.
+        ``HOLD`` được GIỮ NGUYÊN — bước tạo nội dung đăng bài trong phase
+        xuất còn trỏ vào hold này (server nhận hold committed cho đúng một
+        lượt generate_post); nơi gọi chịu trách nhiệm ``HOLD.clear()`` sau.
+
+        Lỗi mạng ở đây KHÔNG làm hỏng lượt chạy — khóa còn trong RAM nên
+        file trung gian vẫn mở được; hold sẽ tự chốt sau TTL, không tính
+        thêm Vox.
+        """
+        from autodub import securestore
+        from autodub.text.translate_common import HOLD, USAGE
+
+        hold_id, key = HOLD.hold_id, HOLD.key
+        if not hold_id:
+            return
+        try:
+            from autodub.saas_client import get_client
+            data = get_client().commit_hold(hold_id)
+            charged = int(data.get("chargedVox") or 0)
+            balance = int(data.get("balance") or 0)
+            # Thẻ tổng kết/nhật ký hiện đúng tổng Vox của video này.
+            USAGE.reset()
+            USAGE.add(charged, balance)
+            logger.info(f"Video này tốn {charged:,} Vox — ví còn "
+                        f"{balance:,} Vox")
+        except Exception as e:  # noqa: BLE001 — video sắp xuất xong, không chặn
+            logger.warning(f"Chưa chốt được lượt trả phí ({e}) — video vẫn "
+                           "hoàn chỉnh; lượt này sẽ tự chốt sau, không tính "
+                           "thêm Vox")
+        # Mở khóa bằng khóa còn trong RAM — kể cả khi commit lỗi mạng, người
+        # dùng đã trả đủ tiền nên dữ liệu thuộc về họ. video_context.json
+        # được mã hóa ngay lúc phân tích (ngoài marker) nên mở riêng.
+        if not key:
+            return
+        try:
+            if securestore.is_locked(work_dir):
+                done = securestore.unlock_all(work_dir, key)
+                if done:
+                    logger.info(f"Đã mở khóa {len(done)} file dữ liệu "
+                                "của dự án")
+            ctx = data_path(work_dir, "video_context.json")
+            if os.path.exists(ctx) and securestore.is_encrypted(ctx):
+                securestore.decrypt_file(ctx, key)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"Không mở khóa được file trung gian ({e}) — "
+                           "chạy lại video sẽ tự mở, không tính phí "
+                           "lần hai")
+
+    def _export_phase(self, state: dict, work_dir: str,
+                      target: TargetLang) -> DubResult:
+        """Phase Xuất video: ghép video, nội dung đăng bài, báo cáo.
+
+        Luồng batch/legacy chạy inline ngay sau ghép audio (hold được chốt
+        ngay sau đó qua :meth:`_settle_hold_inline`); luồng wizard chạy qua
+        :func:`export_committed_project` sau khi người dùng bấm Xuất video
+        (hold đã commit, file đã giải mã).
+        """
+        settings, rep = self.settings, self._reporter
+        phase_start = time.time()
+        from autodub.text.subtitles import refresh_subtitles
+
+        segments = state["segments"]
+        merge_dir = state["merge_dir"]
+        video_path = state["video_path"]
+        merged_audio_path = state["merged_audio_path"]
+        subtitle_style = state.get("subtitle_style") or {}
+        deferred = state.get("deferred_speed")
+        deferred_speed = ((float(deferred[0]), deferred[1])
+                          if deferred else None)
+        # DubRequest tối thiểu — _build_report chỉ đọc url/voice từ đây.
+        req = DubRequest(url=state.get("url"), voice=state.get("voice"),
+                         skip_video=bool(state.get("skip_video")),
+                         subtitle_mode=state.get("subtitle_mode", "none"),
+                         blur_regions=state.get("blur_regions") or [])
 
         # --- Step 7: Merge video (optional) ---
         # Ghim tên giọng THẬT đã dùng (kể cả khi người dùng để mặc định),
@@ -547,6 +849,13 @@ class DubPipeline:
                 "blur_regions": req.blur_regions,
                 "subtitle_style": subtitle_style,
             })
+        else:
+            # Chỉ xuất âm thanh: vẫn ghim kiểu phụ đề của LẦN CHẠY NÀY để
+            # Trình chỉnh sửa mở lên thấy đúng lựa chọn, nhưng không đè
+            # lên tùy chọn người dùng đã chỉnh trong Trình chỉnh sửa.
+            render_opts.setdefault("subtitle_mode", req.subtitle_mode)
+            render_opts.setdefault("blur_regions", req.blur_regions)
+            render_opts.setdefault("subtitle_style", subtitle_style)
         save_render_opts(work_dir, render_opts)
         if not req.skip_video:
             # Phụ đề ghi vào hình: cả câu (.srt) hay cụm chữ theo giọng đọc
@@ -568,17 +877,24 @@ class DubPipeline:
                 fps=deferred_speed[1] if deferred_speed else None,
             )
             rep.emit("merge_video", "done", detail=dubbed_video_path)
+        else:
+            # Luồng wizard dừng trước khi sinh phụ đề — xuất chỉ-âm-thanh
+            # vẫn phải có tệp .srt trong thư mục kết quả.
+            refresh_subtitles(segments, work_dir, target, subtitle_style,
+                              merge_dir=merge_dir, settings=settings)
 
-        # --- Step 8: Generate thumbnails + YouTube metadata ---
+        # --- Step 8: Social post metadata ---
         content_result = self._generate_content(target, segments, req.url,
                                                 work_dir, video_path)
 
         # --- Report + timing guide ---
-        elapsed = time.time() - start_time
+        tts_results = state.get("tts_results") or []
+        elapsed = (float(state.get("elapsed_before", 0))
+                   + (time.time() - phase_start))
         report = self._build_report(
-            target, folder_name, req, lang_code, segments, tts_results,
-            work_dir, audio_path, merged_audio_path, dubbed_video_path,
-            content_result, elapsed,
+            target, state["folder_name"], req, state["lang_code"], segments,
+            tts_results, work_dir, state["audio_path"], merged_audio_path,
+            dubbed_video_path, content_result, elapsed,
         )
 
         report_path = data_path(work_dir, "report.json")
@@ -588,7 +904,8 @@ class DubPipeline:
         # Quality report — người dùng thấy NGAY video này còn vấn đề gì và ở
         # câu nào (chồng tiếng còn lại, câu bị dồn trễ/nén, câu tràn budget)
         # trước khi quyết định đăng.
-        quality = self._build_quality_report(target, segments, timing_report,
+        quality = self._build_quality_report(target, segments,
+                                             state.get("timing") or {},
                                              settings)
         quality_path = data_path(work_dir, "quality_report.json")
         with open(quality_path, "w", encoding="utf-8") as f:
@@ -651,90 +968,259 @@ class DubPipeline:
     def default_output_dir(self, target: TargetLang) -> str:
         return self.settings.vi_output_dir()
 
+    def _setup_hold(
+        self, segments: list[dict], target: TargetLang, work_dir: str,
+        video_duration_s: float,
+    ) -> DubResult | None:
+        """Giữ chỗ Vox cho lượt chạy — gọi ngay sau ASR, mọi luồng.
+
+        Giá là công thức đóng trên số câu thoại ASR vừa tách được, nên chốt
+        được ngay tại đây và không đổi nữa. Ví bị trừ đủ tại bước này; chốt
+        hold (bấm Xuất video ở wizard, tự động ở batch/legacy) chỉ mở khóa,
+        không hoàn cũng không truy thu.
+
+        Dịch tay (tắt dịch tự động) VẪN giữ chỗ: người dùng trả giá nền cho
+        cả lượt xử lý — nghe-chép, tách nhạc, lồng tiếng, ghép video — chỉ
+        không trả phần cộng thêm của dịch tự động.
+
+        Trả về ``DubResult(status="credit_blocked")`` khi thiếu Vox (chặn
+        TRƯỚC khi máy chạy tiếp), hoặc ``None`` để pipeline chạy tiếp:
+
+        - Hold tạo/nhận lại thành công → ``HOLD`` mang hold_id + khóa mã hóa,
+          file trung gian mã hóa trên đĩa cho tới lúc xuất video.
+        - Máy chủ tắt hold / hold đã chốt / không kết nối được → rơi về luồng
+          cũ (trừ Vox theo từng lượt, không mã hóa) kèm cảnh báo.
+        """
+        from autodub.saas_client import (
+            InsufficientCreditError, OfflineError, SaasError, get_client,
+            is_configured)
+        from autodub.text.translate_common import HOLD
+        from autodub.text.translate_saas import run_id_for
+
+        HOLD.clear()
+        if not is_configured():
+            # Chạy thuần trên máy — không có ví Vox nào để giữ chỗ.
+            return None
+        auto = bool(self.settings.translate_enabled)
+        meta = bool(getattr(self.settings, "generate_metadata", True))
+        run_id = run_id_for(segments, target)
+        mins, secs = divmod(int(video_duration_s), 60)
+        try:
+            data = get_client().create_hold(
+                run_id, len(segments), video_duration_s,
+                auto_translate=auto, metadata=meta)
+        except InsufficientCreditError as e:
+            self._reporter.emit("translate", "error", detail="Không đủ Vox")
+            logger.warning(
+                f"Không đủ Vox cho video này: cần giữ chỗ {e.required:,} Vox "
+                f"(ví còn {e.balance:,}). Nạp thêm rồi chạy lại — phần đã "
+                "nghe-chép được dùng lại, không mất công.")
+            return DubResult(status="credit_blocked", work_dir=work_dir,
+                             report={"balance": e.balance,
+                                     "required": e.required,
+                                     "sentences": len(segments),
+                                     "duration_s": video_duration_s})
+        except SaasError as e:
+            if getattr(e, "code", "") == "HOLD_FINISHED":
+                # Hold đã tự chốt sau 48h — giá đã trả đủ từ lúc giữ chỗ.
+                # Lấy lại khóa (get_hold vẫn trả khi committed) và giải mã
+                # file cũ để lượt chạy này dùng tiếp phần đã trả tiền.
+                logger.warning("Lượt trả phí trước đã tự chốt (quá 48 giờ) — "
+                               "dùng lại phần đã dịch, không tính phí lần "
+                               "hai; chạy tiếp kiểu thường")
+                self._unlock_after_commit(work_dir, run_id)
+                return None
+            if getattr(e, "code", "") == "HOLD_DISABLED":
+                logger.warning(f"Không giữ chỗ Vox được ({e}) — chuyển sang "
+                               "trừ Vox theo từng lượt như cũ")
+                return None
+            logger.warning(f"Giữ chỗ Vox lỗi ({e}) — trừ theo từng lượt như cũ")
+            return None
+        except OfflineError as e:
+            # Chưa vào tới bước dịch nên chưa cần fail-closed — bước dịch sẽ
+            # tự báo nếu lúc đó vẫn mất mạng.
+            logger.warning(f"Không kết nối được máy chủ ({e}) — "
+                           "trừ Vox theo từng lượt như cũ")
+            return None
+
+        hold = data.get("hold") or {}
+        key = str(hold.get("encKeyHex") or "")
+        if not key:
+            logger.warning("Máy chủ không trả khóa mã hóa — trừ Vox theo "
+                           "từng lượt như cũ")
+            return None
+        HOLD.set(run_id, key)
+
+        est = int(hold.get("estimatedVox") or 0)
+        self._hold_estimate = est
+        balance = int(data.get("balance") or 0)
+        dur_txt = f"{mins} phút {secs} giây" if mins else f"{secs} giây"
+        if data.get("created"):
+            logger.info(
+                f"Video này tốn {est:,} Vox ({len(segments)} câu thoại, "
+                f"{dur_txt}) — ví còn {balance:,} Vox. Giá đã chốt, chạy lại "
+                "hay dịch nhiều lượt cũng không tính thêm.")
+        else:
+            logger.info(
+                f"Dùng lại lượt đã trả phí của lần chạy trước ({est:,} Vox) "
+                "— không tính phí lần hai.")
+        return None
+
+    def _money_note_for_manual(self) -> str:
+        """Dòng trấn an về Vox để ghi vào hướng dẫn dịch tay.
+
+        Lượt chạy KHÔNG chốt hold ở đây: giá đã chốt và ví đã trừ đủ từ lúc
+        giữ chỗ, nên phần dịch tay không phát sinh thêm đồng nào. Giữ hold
+        nguyên còn cần cho lúc chạy lại — cùng ``run_id`` nhận lại đúng hold
+        cũ kèm khóa, mở được ``video_context.json`` và sổ tạm đã mã hóa,
+        không bị tính phí lần hai.
+        """
+        from autodub.text.translate_common import HOLD
+
+        if not HOLD.active:
+            return ""
+        est = int(getattr(self, "_hold_estimate", 0) or 0)
+        if not est:
+            return ("Phần dịch tay dưới đây không tốn thêm Vox — giá của "
+                    "video này đã chốt từ đầu.")
+        return (f"Video này đã tính {est:,} Vox từ đầu và giá không đổi nữa. "
+                "Phần bạn dịch tay dưới đây không tốn thêm đồng nào, chạy "
+                "lại cũng không bị tính lần hai.")
+
+    @staticmethod
+    def _unlock_after_commit(work_dir: str, hold_id: str) -> None:
+        """Giải mã file trung gian của một hold ĐÃ chốt (tự chốt sau 48h).
+
+        Vox đã trừ rồi nên dữ liệu thuộc về người dùng — lấy lại khóa qua
+        ``get_hold`` (vẫn trả khi committed) và mở khóa toàn bộ. Lỗi ở đây
+        không chặn pipeline: file mã hóa sẽ bị coi là hỏng và làm lại
+        (máy chủ trả kết quả cache theo job_id, không tính phí lần hai).
+        """
+        from autodub import securestore
+
+        if not securestore.is_locked(work_dir):
+            return
+        try:
+            from autodub.saas_client import get_client
+            hold = get_client().get_hold(hold_id).get("hold") or {}
+            key = str(hold.get("encKeyHex") or "")
+            if key:
+                done = securestore.unlock_all(work_dir, key)
+                if done:
+                    logger.info(f"Đã mở khóa {len(done)} file trung gian "
+                                "của lần chạy trước")
+        except Exception as e:  # noqa: BLE001 — mở khóa hỏng thì làm lại
+            logger.warning(f"Không mở khóa được file lần chạy trước ({e}) — "
+                           "phần đó sẽ được làm lại, không tính phí lần hai")
+
     def _auto_translate(
         self, segments: list[dict], target: TargetLang,
-        source_lang: str, engine: str,
-        work_dir: str | None = None,
+        source_lang: str, work_dir: str | None = None,
     ) -> list[dict] | None:
-        """Dịch bằng nơi đã chọn, hoặc trả về None để chuyển sang dịch tay.
+        """Dịch qua máy chủ VoxDub, hoặc trả về None để chuyển sang dịch tay.
 
-        Trả về None khi tắt dịch tự động hoặc nơi dịch chưa đủ cấu hình —
-        lớp gọi khi đó ghi TRANSLATE_PENDING.txt và dừng lại. Hết hạn mức hay
-        API Key hỏng cũng chỉ dừng ở đây, không bao giờ vứt đi cả một lượt
-        nghe-chép dài. Lệnh hủy vẫn được truyền lên trên.
+        Trả về None khi người dùng tắt dịch tự động, hoặc khi máy chủ không
+        dịch được vì lý do không phải lỗi của người dùng. Hết Vox và thiết bị
+        bị khóa thì NÉM lỗi lên trên: đó là những việc người dùng phải xử lý
+        (nạp thêm, liên hệ hỗ trợ), lặng lẽ chuyển sang dịch tay chỉ khiến họ
+        không hiểu chuyện gì vừa xảy ra.
 
-        Dịch hai lượt: lượt 0 phân tích lời thoại rồi bơm ngữ cảnh (tóm tắt,
-        xưng hô, thuật ngữ) vào lời nhắc của MỌI lô; dịch xong chạy lượt rà
-        soát các câu nghi vấn. Cả hai đều có bộ nhớ đệm và tắt được riêng, và
-        hỏng thì cũng không làm hỏng bản dịch.
+        Dịch ba lượt: lượt 0 phân tích lời thoại rồi bơm ngữ cảnh (tóm tắt,
+        xưng hô, thuật ngữ) vào lời nhắc của MỌI lô; lượt chính chia lô gửi
+        lên máy chủ; lượt rà soát soát lại các câu nghi vấn. Cả ba đều có bộ
+        nhớ đệm — chạy lại không tốn Vox cho phần đã xong.
         """
         settings, rep = self.settings, self._reporter
         if not settings.translate_enabled:
             return None
 
-        from autodub.text.translate_openai import label_of
-        name = label_of(engine) if engine != "gemini" else "Gemini"
-        if not settings.translate_configured(engine):
-            logger.warning(
-                f"Đã chọn dịch bằng {name} nhưng chưa đủ API Key hoặc mô "
-                "hình — chuyển sang dịch tay. Điền lại trong trang Cài đặt, "
-                "phần Kết nối.")
+        from autodub.saas_client import is_configured
+        if not is_configured():
+            # Chạy thuần trên máy: không có máy chủ dịch nào được cấu hình.
+            # Trả None để pipeline rẽ sang dịch tay (TRANSLATE_PENDING.txt).
+            logger.info("Chưa cấu hình máy chủ dịch — chuyển sang dịch tay")
             return None
 
-        # Lượt 0 — kết quả lưu lại trong thư mục dự án nên chạy tiếp không
-        # tốn thêm lượt gọi. Bản cấu hình hiệu dụng chỉ sống trong lượt dịch
-        # này (không ghi ra .env).
-        from autodub.text.translate_analysis import (analyze_transcript,
-                                                     apply_analysis)
+        from autodub.saas_client import (
+            DeviceBlockedError, InsufficientCreditError, MaintenanceError,
+            OfflineError, SaasError)
         from autodub.text.translate_common import USAGE
-        USAGE.reset()      # đếm token của riêng video này, từ phân tích trở đi
-        cache = data_path(work_dir, "video_context.json") if work_dir else None
-        analysis = analyze_transcript(segments, source_lang, engine, settings,
-                                      cache_path=cache)
-        effective = apply_analysis(settings, analysis)
+        from autodub.text.translate_saas import (
+            analyze_transcript, apply_analysis, run_id_for, translate_segments)
 
-        _key, _url, model = effective.translate_credentials(engine)
-        rep.emit("translate", "start", detail=f"{name}: {model}")
+        from autodub.media.audio import FALLBACKS
+
+        USAGE.reset()      # đếm Vox của riêng video này, từ phân tích trở đi
+        FALLBACKS.reset()  # các câu phải dùng bản dự phòng, cũng của riêng nó
+        run_id = run_id_for(segments, target)
+
+        # Tiêu đề gốc (downloader lưu lúc tải) — ngữ cảnh miễn phí cho cả
+        # lượt phân tích lẫn prompt của mọi lô dịch.
+        title = ""
+        if work_dir:
+            from autodub.workdir import load_video_meta
+            title = str(load_video_meta(work_dir).get("title", "")).strip()
+
+        rep.emit("translate", "start", detail="VoxDub Cloud")
         logger.info(f"Đang dịch {len(segments)} câu sang tiếng Việt...")
-        # Sổ tạm theo lô: hết hạn mức ở lô 40/50 thì lần chạy lại chỉ dịch
-        # nốt 10 lô cuối. Dịch trọn vẹn thì sổ tự xóa.
-        ckpt = (data_path(work_dir, "translate_checkpoint.json")
-                if work_dir else None)
+
         try:
-            if engine == "gemini":
-                from autodub.text.translate_gemini import translate_segments
-                result = translate_segments(segments, target, source_lang,
-                                            effective, rep,
-                                            checkpoint_path=ckpt)
-            else:
-                from autodub.text.translate_openai import translate_segments
-                result = translate_segments(segments, target, source_lang,
-                                            effective, rep, engine=engine,
-                                            checkpoint_path=ckpt)
+            # Lượt 0 — kết quả lưu trong thư mục dự án nên chạy tiếp không
+            # tốn thêm Vox. Bản cấu hình hiệu dụng chỉ sống trong lượt này.
+            effective = settings
+            if settings.translate_analysis:
+                cache = data_path(work_dir, "video_context.json") if work_dir else None
+                analysis = analyze_transcript(segments, source_lang,
+                                              video_title=title,
+                                              cache_path=cache)
+                effective = apply_analysis(settings, analysis)
+            if title and not effective.translate_video_title:
+                import dataclasses
+                effective = dataclasses.replace(effective,
+                                                translate_video_title=title)
+
+            # Sổ tạm theo lô: rớt mạng ở lô 40/50 thì lần chạy lại chỉ gửi
+            # nốt 10 lô cuối. Dịch trọn vẹn thì sổ tự xóa.
+            ckpt = (data_path(work_dir, "translate_checkpoint.json")
+                    if work_dir else None)
+            result = translate_segments(segments, target, source_lang,
+                                        effective, rep, checkpoint_path=ckpt)
         except PipelineCancelled:
             raise
-        except Exception as e:
-            logger.warning(f"{name} dịch lỗi ({e}) — chuyển sang dịch tay")
+        except (InsufficientCreditError, DeviceBlockedError, MaintenanceError):
+            # Người dùng phải biết và phải hành động — không nuốt.
+            rep.emit("translate", "error", detail="")
+            raise
+        except OfflineError as e:
+            # Fail-closed: mất mạng thì dừng hẳn với lời báo rõ ràng. Sổ tạm
+            # còn nguyên nên chạy lại chỉ dịch nốt phần chưa xong.
+            logger.error(f"Không kết nối được máy chủ VoxDub: {e}")
+            rep.emit("translate", "error", detail=str(e))
+            raise
+        except SaasError as e:
+            logger.warning(f"Dịch tự động lỗi ({e}) — chuyển sang dịch tay")
+            rep.emit("translate", "error", detail=str(e))
+            return None
+        except Exception as e:      # lỗi lạ: vẫn còn đường dịch tay
+            logger.warning(f"Dịch tự động lỗi ({e}) — chuyển sang dịch tay")
             rep.emit("translate", "error", detail=str(e))
             return None
 
         # Lượt rà soát — soát câu tràn khung / lẫn chữ Hán / sót ý rồi dịch
-        # lại đúng các câu đó.
+        # lại đúng các câu đó. Hỏng thì giữ nguyên bản lượt đầu.
         try:
             from autodub.text.translate_review import review_translations
-            result = review_translations(result, target, source_lang, engine,
-                                         effective)
+            result = review_translations(result, target, source_lang,
+                                         effective, run_id=run_id)
         except PipelineCancelled:
             raise
         except Exception as e:
             logger.warning(f"Rà soát bản dịch lỗi ({e}) — dùng bản lượt đầu")
+
         usage = _usage_snapshot()
-        if usage["requests"]:
-            logger.info(
-                f"Lượt dịch dùng {usage['requests']} lượt gọi, "
-                f"{usage['total_tokens']:,} token "
-                f"(gửi {usage['prompt_tokens']:,}, "
-                f"nhận {usage['completion_tokens']:,})")
+        if usage["vox"]:
+            logger.info(f"Lượt dịch này tốn {usage['vox']:,} Vox "
+                        f"(còn lại {usage['balance_after']:,})")
         return result
 
     def _load_translation(
@@ -747,12 +1233,23 @@ class DubPipeline:
         errors instead of a crash deep inside TTS.
         """
         try:
-            with open(path, encoding="utf-8") as f:
-                segments = json.load(f)
-        except json.JSONDecodeError as e:
+            # File có thể đang mã hóa (hold chưa chốt) — read_json_secure tự
+            # nhận biết; file thường đọc như open() bình thường.
+            from autodub import securestore
+            from autodub.text.translate_common import HOLD
+            segments = securestore.read_json_secure(path, HOLD.key)
+        except securestore.SecureStoreError as e:
+            # File thường mà JSON hỏng → lỗi sửa-tay quen thuộc; chỉ file
+            # đang mã hóa mới là chuyện khóa giải mã.
+            if not securestore.is_encrypted(path):
+                raise ValueError(
+                    f"Invalid JSON in {path}: {e}. "
+                    "If the AI wrapped the output in ```json fences, "
+                    "remove them and re-save."
+                ) from e
             raise ValueError(
-                f"Invalid JSON in {path}: {e}. "
-                "If the AI wrapped the output in ```json fences, remove them and re-save."
+                f"Không giải mã được bản dịch {path}: {e}. Chạy lại video để "
+                "nhận lại khóa từ máy chủ (phần đã dịch không tính phí lại)."
             ) from e
 
         if not isinstance(segments, list) or not segments:
@@ -819,6 +1316,18 @@ class DubPipeline:
                               ensure_ascii=False, indent=2)
             except OSError:
                 pass  # marker is a convenience, never fail the run over it
+            # File ngoài work_dir có thể mang kèm data/video_meta.json (title)
+            # — batch prefetch tải vào thư mục riêng rồi đưa qua file_path.
+            # Chép meta vào work_dir để bước dịch/metadata đọc được ngay.
+            try:
+                src_meta = os.path.join(os.path.dirname(os.path.abspath(path)),
+                                        "data", "video_meta.json")
+                dst_meta = data_path(work_dir, "video_meta.json")
+                if os.path.isfile(src_meta) and not os.path.exists(dst_meta):
+                    import shutil
+                    shutil.copyfile(src_meta, dst_meta)
+            except OSError:
+                pass
             return path
 
         if file_path:
@@ -961,7 +1470,8 @@ class DubPipeline:
         segment order; cancellation propagates from any task.
         """
         from concurrent.futures import ThreadPoolExecutor, as_completed
-        from pydub import AudioSegment
+
+        from autodub.media.audio import wav_duration_s
 
         rep = self._reporter
         created_here = synth is None
@@ -971,6 +1481,32 @@ class DubPipeline:
             # below (e.g. an exception between here and the pool block).
             self._active_synth = synth
         text_field = target.text_field
+
+        # Giọng phụ per-segment: câu nào mang khóa "voice" khác giọng chính
+        # thì đọc bằng giọng đó. Mỗi giọng phụ chỉ mở MỘT tiến trình con —
+        # vài câu lẻ không đáng nhân đôi RAM của cả nhóm worker.
+        from autodub.speech.tts import voices as voice_catalog
+        run_voice = voice_catalog.resolve(self.settings, voice)
+        extra_synths: dict[str, object] = {}
+        extra_lock = threading.Lock()
+
+        def _synth_for(seg: dict):
+            seg_voice = str(seg.get("voice", "")).strip()
+            if not seg_voice:
+                return synth
+            name = voice_catalog.resolve(self.settings, seg_voice)
+            if name == run_voice:
+                return synth
+            with extra_lock:
+                if self._synth_cache is not None:
+                    return self._synth_cache.get(target, self.settings, name)
+                s = extra_synths.get(name)
+                if s is None:
+                    from autodub.speech.tts import get_synthesizer
+                    s = get_synthesizer(target, self.settings, name,
+                                        num_workers=1)
+                    extra_synths[name] = s
+                return s
 
         total = len(segments)
         # Mỗi câu một dòng nhật ký sẽ ngập giao diện khi video dài — lấy mẫu
@@ -983,6 +1519,26 @@ class DubPipeline:
             min(self.settings.parallel_workers,
                 self.settings.vieneu_max_workers)))
 
+        # Đếm trước phần việc thật: câu đã có clip từ lần chạy trước thì
+        # không phải đọc lại. Người dùng cần thấy "còn phải đọc bao nhiêu",
+        # không phải tổng số câu — nhất là khi chạy tiếp một dự án cũ.
+        cached_n = sum(
+            1 for seg in segments
+            if os.path.exists(seg_wav_path(seg_dir, seg["id"]))
+            and os.path.getsize(seg_wav_path(seg_dir, seg["id"])) > 0)
+        seg_voices = {str(s.get("voice", "")).strip()
+                      for s in segments if str(s.get("voice", "")).strip()}
+        n_voices = len({run_voice} | {
+            voice_catalog.resolve(self.settings, v) for v in seg_voices})
+        logger.info(
+            f"Giọng đọc: {run_voice}"
+            + (f" + {n_voices - 1} giọng riêng cho một số câu"
+               if n_voices > 1 else "")
+            + f" — {total - cached_n}/{total} câu cần đọc"
+            + (f" ({cached_n} câu dùng lại của lần chạy trước)"
+               if cached_n else "")
+            + f", chạy {n_threads} luồng song song")
+
         results: list[dict | None] = [None] * total
         count_lock = threading.Lock()
         done_count = 0
@@ -991,14 +1547,15 @@ class DubPipeline:
             rep.check_cancelled()
             seg_path = seg_wav_path(seg_dir, seg["id"])
             if os.path.exists(seg_path) and os.path.getsize(seg_path) > 0:
-                cached = AudioSegment.from_wav(seg_path)
+                # Chỉ cần thời lượng: đọc header WAV, đừng nạp cả sóng âm —
+                # resume video nghìn câu nhanh hơn hàng chục lần.
                 return {
                     "path": seg_path,
-                    "actual_duration": round(len(cached) / 1000.0, 3),
+                    "actual_duration": round(wav_duration_s(seg_path) or 0.0, 3),
                     "speed_adjusted": False,
                     "rate_applied": "cached",
                 }
-            return synth.synthesize(
+            return _synth_for(seg).synthesize(
                 text=seg[text_field],
                 output_path=seg_path,
                 # Engines always render at natural pace now — timing is
@@ -1042,6 +1599,13 @@ class DubPipeline:
         finally:
             # Release worker subprocesses even on error/cancel — a leaked
             # pool pins GBs of VRAM in a long-lived GUI process.
+            for extra in extra_synths.values():
+                if hasattr(extra, "close"):
+                    try:
+                        extra.close()
+                    except Exception as e:
+                        logger.warning(
+                            f"Không đóng được synth giọng phụ: {e}")
             if (created_here and self._synth_cache is None
                     and hasattr(synth, "close")):
                 try:
@@ -1077,37 +1641,47 @@ class DubPipeline:
         self, target: TargetLang, segments: list[dict],
         source_url: str | None, work_dir: str, video_path: str | None = None,
     ) -> dict:
-        """Bước 8: prompt ảnh bìa + tiêu đề/mô tả/hashtag cho mạng xã hội."""
+        """Bước 8: tiêu đề, mô tả và hashtag cho mạng xã hội.
+
+        Bước phụ — hỏng thì video vẫn xong. Riêng hết Vox thì ném lên trên để
+        giao diện mời người dùng nạp thêm, vì đó không phải lỗi kỹ thuật.
+        """
+        del target, video_path
         rep = self._reporter
         settings = self.settings
-        content_result = {"thumbnails": [], "metadata": {}}
+        content_result: dict = {"metadata": {}}
         if not settings.generate_metadata:
             logger.info("Bỏ qua tạo tiêu đề và mô tả (đã tắt trong Cài đặt)")
             rep.emit("content", "skip")
             return content_result
-        if not (settings.gemini_configured() or settings.translate_configured()):
-            logger.info("Bỏ qua tạo tiêu đề và mô tả (chưa có API Key nào "
-                        "trong trang Cài đặt)")
-            rep.emit("content", "skip")
-            return content_result
 
         logger.info("=" * 60)
-        logger.info("STEP 8: Generating thumbnails & social metadata")
+        logger.info("STEP 8: Generating social metadata")
         logger.info("Đang viết tiêu đề, mô tả và hashtag cho "
                     "YouTube/TikTok/Facebook...")
         rep.emit("content", "start")
+
+        from autodub.saas_client import InsufficientCreditError
+
         try:
             from autodub.content.generator import generate_content
+            from autodub.text.translate_saas import run_id_for
+            from autodub.workdir import load_video_meta
             content_result = generate_content(
                 segments=segments,
                 source_url=source_url,
                 output_dir=youtube_dir(work_dir, create=True),
                 settings=settings,
-                video_path=video_path,
+                video_title=str(load_video_meta(work_dir).get("title", "")),
+                # Cùng transcript ⇒ cùng job_id ⇒ chạy lại không tính phí lần hai.
+                job_id=f"post-{run_id_for(segments, _POST_TARGET)}",
             )
-            logger.info("Đã viết xong phần đăng bài và prompt ảnh bìa "
+            logger.info("Đã viết xong phần đăng bài "
                         "(xem thư mục youtube trong dự án)")
             rep.emit("content", "done")
+        except InsufficientCreditError:
+            rep.emit("content", "error", detail="Không đủ Vox")
+            raise
         except Exception as e:
             logger.error(f"Tạo nội dung đăng bài lỗi (không ảnh hưởng video): {e}")
             rep.emit("content", "error", detail=str(e))
@@ -1141,7 +1715,6 @@ class DubPipeline:
                 "transcript_dub_srt": os.path.join(work_dir, target.srt_name),
                 "dub_audio": merged_audio_path,
                 "dubbed_video": dubbed_video_path,
-                "thumbnails": content_result.get("thumbnails", []),
                 "youtube_metadata": content_result.get("metadata_file"),
             },
         }
@@ -1155,13 +1728,28 @@ class DubPipeline:
         ``per_segment`` chỉ chứa các câu CÓ vấn đề (kèm text để tìm nhanh
         trong editor) — video sạch thì danh sách rỗng.
         """
+        from autodub.media.audio import FALLBACKS
         from autodub.text.translate_hint import effective_cps, payload_segment
+
+        # Câu phải dùng bản dự phòng (atempo/hậu kỳ ffmpeg trượt): clip vẫn
+        # có nhưng sai tốc độ hoặc chưa chuẩn hóa âm lượng. Không làm hỏng
+        # video nên không raise, song phải hiện ra đây — nghe thấy chất lượng
+        # tệ mà không có dòng nào giải thích là điều tệ nhất.
+        fallbacks = FALLBACKS.snapshot()
+        speed_fallback = set(fallbacks.get("atempo_failed", ()))
+        post_fallback = set(fallbacks.get("postprocess_failed", ()))
 
         # Budget theo tốc độ THẬT: giọng đã chỉnh voice_speed; segments lúc
         # này ĐÃ nằm trên timeline kéo dài (video chậm xong rồi) nên không
         # nhân thêm 1/video_speed — không thì câu vừa khít vẫn bị báo oan.
         cps = effective_cps(settings, video_slowdown_pending=False)
-        timing = timing_report.to_dict() if timing_report is not None else {}
+        # Nhận cả TimingReport lẫn dict (export_state lưu sẵn dạng dict).
+        if timing_report is None:
+            timing = {}
+        elif isinstance(timing_report, dict):
+            timing = timing_report
+        else:
+            timing = timing_report.to_dict()
         by_id = {d.get("id"): d for d in timing.get("details", [])}
 
         per_segment: list[dict] = []
@@ -1174,6 +1762,10 @@ class DubPipeline:
             if budget and len(text) > budget * 1.25:
                 issues["over_budget_chars"] = len(text) - budget
                 over_budget += 1
+            if seg.get("id") in speed_fallback:
+                issues["speed_fallback"] = True
+            if seg.get("id") in post_fallback:
+                issues["postprocess_fallback"] = True
             if issues:
                 per_segment.append({
                     "id": seg.get("id"),
@@ -1192,6 +1784,8 @@ class DubPipeline:
                 "segments_overlapped": timing.get("segments_overlapped", 0),
                 "total_overlap_s": timing.get("total_overlap_s", 0.0),
                 "segments_over_budget": over_budget,
+                "segments_speed_fallback": len(speed_fallback),
+                "segments_postprocess_fallback": len(post_fallback),
             },
             # Token đã tiêu cho video này (phân tích + dịch + rà soát) —
             # người dùng trả tiền theo con số này nhưng không thấy nó ở đâu
@@ -1265,3 +1859,88 @@ class DubPipeline:
         guide["summary"]["segments_ok"] = report["total_segments"] - need_edit
 
         return guide
+
+
+def export_committed_project(
+    work_dir: str,
+    settings: Settings,
+    progress: ProgressFn | None = None,
+    cancel_event: threading.Event | None = None,
+) -> DubResult:
+    """Xuất video của một dự án đang chờ (``status="export_pending"``).
+
+    Thứ tự làm — mỗi bước đều an toàn khi lặp lại:
+
+    1. ``commit_hold`` — mở khóa dự án. Giá đã trừ đủ lúc giữ chỗ nên bước
+       này KHÔNG động vào tiền. Idempotent: hold đã chốt (kể cả tự chốt sau
+       48h) trả lại đúng kết quả cũ kèm khóa giải mã.
+    2. Giải mã toàn bộ file trung gian theo marker ``voxdub_lock.json``.
+    3. Chạy phase Xuất video: phụ đề, ghép MP4, nội dung đăng bài, báo cáo.
+
+    Mất mạng ở bước 1 → ném :class:`OfflineError`, chưa mất gì — file còn mã
+    hóa, bấm lại là chạy tiếp.
+    """
+    from autodub import securestore
+    from autodub.saas_client import get_client
+    from autodub.text.translate_common import HOLD, USAGE
+
+    lock = securestore.read_lock(work_dir)
+    if not lock:
+        raise RuntimeError(
+            f"Dự án không ở trạng thái chờ xuất (thiếu marker khóa): {work_dir}")
+    hold_id = str(lock.get("hold_id") or "")
+    if not hold_id:
+        raise RuntimeError("Marker khóa hỏng (thiếu hold_id) — chạy lại video")
+
+    # 1. Chốt hold — chỉ mở khóa, tiền đã trừ đủ từ lúc giữ chỗ.
+    data = get_client().commit_hold(hold_id)
+    key = str(data.get("encKeyHex") or "")
+    if not key:
+        raise RuntimeError("Máy chủ không trả khóa giải mã khi chốt hold — "
+                           "liên hệ hỗ trợ")
+    charged = int(data.get("chargedVox") or 0)
+    balance = int(data.get("balance") or 0)
+    if data.get("replayed"):
+        logger.info(f"Video này đã tính {charged:,} Vox từ trước — chỉ xuất video")
+    else:
+        logger.info(f"Video này tốn {charged:,} Vox — ví còn {balance:,} Vox")
+
+    # 2. Giải mã file trung gian — từ đây dữ liệu thuộc về người dùng.
+    unlocked = securestore.unlock_all(work_dir, key)
+    if unlocked:
+        logger.info(f"Đã mở khóa {len(unlocked)} file dữ liệu của dự án")
+
+    # 3. Đọc trạng thái xuất rồi chạy nốt phase cuối.
+    state_path = data_path(work_dir, "export_state.json")
+    try:
+        with open(state_path, encoding="utf-8") as f:
+            state = json.load(f)
+    except (OSError, json.JSONDecodeError) as e:
+        raise RuntimeError(
+            f"Không đọc được trạng thái xuất ({e}) — chạy lại video để dựng "
+            "lại (phần đã dịch không tính phí lần hai)") from e
+
+    from autodub.media.audio import FALLBACKS
+
+    # GIỮ hold_id qua phase cuối: bước tạo nội dung đăng bài chạy SAU commit,
+    # nhưng +20 Vox của gói tiêu đề + mô tả đã nằm trong giá hold — server
+    # nhận hold committed cho đúng một lượt generate_post, không trừ ví thêm.
+    HOLD.set(hold_id, key)
+    USAGE.reset()
+    USAGE.add(charged, balance)  # thẻ tổng kết hiện đúng số Vox của video này
+    FALLBACKS.reset()          # lượt dựng lại này tự đếm fallback của nó
+
+    pipeline = DubPipeline(settings, progress=progress,
+                           cancel_event=cancel_event)
+    target = get_target(str(state.get("target") or "vi"))
+    try:
+        result = pipeline._export_phase(state, work_dir, target)
+    finally:
+        HOLD.clear()           # hold đã xong việc — không rớt sang lượt sau
+
+    # Trạng thái xuất đã dùng xong — dọn để marker/resume không hiểu nhầm.
+    try:
+        os.remove(state_path)
+    except OSError:
+        pass
+    return result

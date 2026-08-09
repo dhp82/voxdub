@@ -1,9 +1,9 @@
-"""Phần dùng chung của mọi nơi dịch: kiểu lỗi, đọc JSON và ghép bản dịch.
+"""Phần dùng chung của luồng dịch: kiểu lỗi, sổ tạm và tiện ích văn bản.
 
-Nơi dịch nào cũng nhận về một khối JSON do mô hình sinh ra, nên phần "đọc cho
-bằng được rồi ghép vào đúng câu" là giống hệt nhau. Gom về đây để Gemini và
-các dịch vụ tương thích OpenAI dùng chung một cách xử lý — sửa một chỗ là mọi
-nơi cùng đúng.
+Việc gọi mô hình và đọc JSON đã chuyển hẳn lên máy chủ (xem
+``control_server/src/services/ai-gateway.service.js``). Còn lại ở đây là
+những thứ chỉ máy khách mới cần: sổ đếm token cho báo cáo chất lượng, sổ lưu
+tạm bản dịch theo lô để chạy lại không mất công, và bộ dò chữ Hán sót.
 """
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ import os
 import re
 import threading
 
-from autodub.utils import save_json_atomic, setup_logging
+from autodub.utils import setup_logging
 
 logger = setup_logging("autodub.translate")
 
@@ -26,51 +26,84 @@ class TranslateError(Exception):
     """Nơi dịch không trả về kết quả dùng được."""
 
 
-class RateLimited(TranslateError):
-    """Hết hạn mức (HTTP 429) sau khi đã thử lại.
-
-    KHÔNG được chia đôi lô khi gặp lỗi này: chia đôi làm số request tăng gấp
-    đôi, đúng thứ mà giới hạn tốc độ đang chặn.
-    """
-
-
 class UsageCounter:
-    """Đếm request và token của một lượt dịch, an toàn đa luồng.
+    """Đếm Vox đã tiêu trong một lượt dịch, an toàn đa luồng.
 
-    Người dùng trả tiền theo token nhưng không nhìn thấy con số đó ở đâu.
-    Mọi nơi dịch cộng vào đây mỗi lần đọc phản hồi; pipeline chốt sổ khi
-    render xong và ghi vào quality_report.json để người dùng biết video này
-    tốn bao nhiêu.
+    Máy chủ trả về ``creditCharged`` và ``balanceAfter`` sau mỗi lượt gọi.
+    Cộng dồn ở đây rồi ghi vào ``quality_report.json`` là cách duy nhất để
+    người dùng đối chiếu "video này tốn bao nhiêu" với lịch sử ví của họ.
     """
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
-        self._requests = 0
-        self._prompt = 0
-        self._completion = 0
+        self._calls = 0
+        self._vox = 0
+        self._balance_after = 0
 
     def reset(self) -> None:
         with self._lock:
-            self._requests = self._prompt = self._completion = 0
+            self._calls = self._vox = self._balance_after = 0
 
-    def add(self, prompt_tokens: int, completion_tokens: int) -> None:
+    def add(self, vox: int, balance_after: int = 0) -> None:
         with self._lock:
-            self._requests += 1
-            self._prompt += max(0, int(prompt_tokens or 0))
-            self._completion += max(0, int(completion_tokens or 0))
+            self._calls += 1
+            self._vox += max(0, int(vox or 0))
+            self._balance_after = max(0, int(balance_after or 0))
 
     def snapshot(self) -> dict:
         with self._lock:
             return {
-                "requests": self._requests,
-                "prompt_tokens": self._prompt,
-                "completion_tokens": self._completion,
-                "total_tokens": self._prompt + self._completion,
+                "calls": self._calls,
+                "vox": self._vox,
+                "balance_after": self._balance_after,
             }
 
 
 # Sổ chung cho cả lượt dịch (phân tích, dịch, rà soát đều cộng vào đây).
 USAGE = UsageCounter()
+
+
+class HoldContext:
+    """Hold Vox đang gắn với lượt chạy hiện tại (luồng wizard), đa luồng an toàn.
+
+    Pipeline set trước bước dịch; mọi lượt gọi AI đọc ``hold_id`` từ đây để
+    tích lũy usage vào hold thay vì trừ ví thẳng, và securestore đọc ``key``
+    để mã hóa file trung gian. Khóa CHỈ sống trong RAM — crash thì chạy lại
+    cùng video → cùng run_id → máy chủ cấp lại khóa qua ``get_hold``.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._hold_id: str | None = None
+        self._key: str | None = None
+
+    def set(self, hold_id: str, key: str) -> None:
+        with self._lock:
+            self._hold_id = hold_id
+            self._key = key
+
+    def clear(self) -> None:
+        with self._lock:
+            self._hold_id = self._key = None
+
+    @property
+    def hold_id(self) -> str | None:
+        with self._lock:
+            return self._hold_id
+
+    @property
+    def key(self) -> str | None:
+        with self._lock:
+            return self._key
+
+    @property
+    def active(self) -> bool:
+        with self._lock:
+            return bool(self._hold_id and self._key)
+
+
+# Hold của lượt chạy hiện tại (rỗng ở luồng batch/legacy — mọi thứ như cũ).
+HOLD = HoldContext()
 
 
 def contains_cjk(text: str) -> bool:
@@ -96,11 +129,17 @@ class TranslateCheckpoint:
         self.text_field = text_field
         self._lock = threading.Lock()
         self._items: dict[str, dict] = {}
+        #: Số lần ghi sổ thất bại — đọc sau lượt dịch để giải thích vì sao
+        #: chạy lại không tận dụng được gì.
+        self.write_errors = 0
         if not path or not os.path.exists(path):
             return
         try:
-            with open(path, encoding="utf-8") as f:
-                data = json.load(f)
+            # Sổ tạm chứa bản dịch trả phí — luồng wizard mã hóa nó khi hold
+            # chưa chốt. read_json_secure tự nhận biết file thường/mã hóa.
+            from autodub import securestore
+
+            data = securestore.read_json_secure(path, HOLD.key)
             if (isinstance(data, dict)
                     and data.get("text_field") == text_field
                     and isinstance(data.get("items"), dict)):
@@ -111,7 +150,7 @@ class TranslateCheckpoint:
                 if self._items:
                     logger.info(f"Đọc sổ dịch tạm: {len(self._items)} câu "
                                 "đã dịch từ lượt trước")
-        except (ValueError, OSError) as e:
+        except Exception as e:  # noqa: BLE001 — sổ hỏng/sai khóa đều dịch lại
             logger.warning(f"Sổ dịch tạm hỏng ({e}) — dịch lại từ đầu")
             self._items = {}
 
@@ -140,12 +179,19 @@ class TranslateCheckpoint:
                     "text": seg.get(self.text_field, ""),
                 }
             try:
-                save_json_atomic(
+                from autodub import securestore
+
+                # HOLD active → sổ tạm nằm trên đĩa dưới dạng mã hóa.
+                securestore.write_json_secure(
                     {"text_field": self.text_field, "items": self._items},
-                    self.path)
+                    self.path, HOLD.key)
             except OSError as e:
-                # Không lưu được sổ tạm thì lượt dịch vẫn phải chạy tiếp.
-                logger.warning(f"Không ghi được sổ dịch tạm: {e}")
+                # Không lưu được sổ tạm thì lượt dịch vẫn phải chạy tiếp —
+                # nhưng ở mức error, vì đây chính là lý do "chạy lại vẫn phải
+                # dịch lại từ đầu": không có sổ thì không có gì để dùng lại.
+                self.write_errors += 1
+                logger.error(f"Không ghi được sổ dịch tạm ({e}) — chạy lại "
+                             "sẽ phải dịch lại các lô này")
 
     def discard(self) -> None:
         """Xóa sổ khi cả lượt dịch đã thành công trọn vẹn."""

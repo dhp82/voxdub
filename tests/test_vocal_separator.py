@@ -195,3 +195,51 @@ def test_demucs_cache_ensure_fails_without_gpu_venv():
         assert cache.separate("in.wav", "v.wav", "nv.wav", False) is False
     probe.assert_called_once()  # lần hai đã _failed, không dò lại
     cache.close()
+
+
+def test_normalize_passes_a_timeout(tmp_path):
+    """ffmpeg không có timeout thì một tiến trình kẹt treo cả pipeline."""
+    src = str(tmp_path / "raw.wav")
+    _make_wav(src, duration_ms=1000)
+    dst = str(tmp_path / "out.wav")
+
+    def fake_run(cmd, **kwargs):
+        assert kwargs.get("timeout"), "thiếu timeout cho ffmpeg"
+        _make_wav(dst)
+        return mock.Mock(returncode=0, stderr="")
+
+    with mock.patch("autodub.media.vocal_separator.subprocess.run",
+                    side_effect=fake_run):
+        vocal_separator._normalize(src, dst, "16000")
+
+
+def test_normalize_timeout_raises_runtime_error(tmp_path):
+    """TimeoutExpired phải thành RuntimeError để caller rơi vào fallback."""
+    import subprocess
+
+    src = str(tmp_path / "raw.wav")
+    _make_wav(src)
+    with mock.patch("autodub.media.vocal_separator.subprocess.run",
+                    side_effect=subprocess.TimeoutExpired("ffmpeg", 60)):
+        try:
+            vocal_separator._normalize(src, str(tmp_path / "out.wav"), "16000")
+        except RuntimeError as exc:
+            assert "timed out" in str(exc)
+        else:
+            raise AssertionError("phải ném RuntimeError")
+
+
+def test_read_line_kills_hung_worker():
+    """Timeout khi đọc phải giết tiến trình con, không để nó treo tới hết phiên."""
+    cache = vocal_separator.DemucsCache()
+    proc = mock.Mock()
+    proc.stdout.readline.side_effect = lambda: __import__("time").sleep(30)
+    proc.poll.return_value = None
+    cache._proc = proc
+    try:
+        cache._read_line(0.1)
+    except RuntimeError:
+        pass
+    else:
+        raise AssertionError("phải ném RuntimeError")
+    proc.kill.assert_called_once()

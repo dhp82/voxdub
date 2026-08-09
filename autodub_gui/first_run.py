@@ -28,12 +28,13 @@ _CHECKS = (
      "dẫn hệ thống.",
      "", lambda s: bool(shutil.which("ffmpeg"))),
     ("Bộ giọng đọc VieNeu",
-     "Bắt buộc để lồng tiếng. Chạy một lần, khoảng vài phút.",
+     "Tùy chọn — để lồng tiếng offline. Không cài vẫn dùng được bộ giọng "
+     "CapCut (cần mạng). Chạy một lần, khoảng vài phút.",
      "py scripts/setup_vieneu.py", lambda s: s.vieneu_configured()),
     ("Dịch tự động",
-     "Cần API Key miễn phí (OpenRouter/Gemini). Điền ở trang "
-     "Cài đặt, thẻ Kết nối.",
-     "", lambda s: s.translate_configured()),
+     "Chạy qua máy chủ VoxDub — không cần cấu hình gì. Máy mới được tặng "
+     "Vox dùng thử; xem số dư ở trang Tài khoản.",
+     "", lambda s: s.translate_enabled),
 )
 
 

@@ -78,12 +78,17 @@ def test_parse_empty_input():
 class FakePipeline:
     """Records the requests it receives and replays scripted outcomes."""
 
-    def __init__(self, outcomes=None):
+    def __init__(self, outcomes=None, work_dirs=None):
         self.outcomes = outcomes or {}
+        # url -> work_dir mà pipeline "đã tạo" cho lượt chạy đó (kể cả khi
+        # lượt chạy đổ giữa chừng), giống pipeline thật đặt last_work_dir.
+        self.work_dirs = work_dirs or {}
         self.seen: list[DubRequest] = []
+        self.last_work_dir = ""
 
     def run(self, req):
         self.seen.append(req)
+        self.last_work_dir = req.resume_dir or self.work_dirs.get(req.url, "wd")
         outcome = self.outcomes.get(req.url, "ok")
         if isinstance(outcome, Exception):
             raise outcome
@@ -196,6 +201,36 @@ def test_failed_urls_are_retried_on_resume(env):
     run_batch("https://a.com/1", settings, template, pipeline=pipe2)
 
     assert [r.url for r in pipe2.seen] == ["https://a.com/1"]
+
+
+def test_failed_video_records_work_dir_for_resume(env, tmp_path):
+    """Video hỏng giữ lại thư mục dở dang; chạy lại đi TIẾP đúng thư mục đó
+    (resume_dir) thay vì tạo thư mục mới — không tải/nghe-chép lại từ đầu."""
+    settings, template, state_path = env
+    crash_dir = tmp_path / "20260101000000_vi"
+    crash_dir.mkdir()
+    pipe = FakePipeline({"https://a.com/1": RuntimeError("đứt mạng")},
+                        work_dirs={"https://a.com/1": str(crash_dir)})
+
+    run_batch("https://a.com/1", settings, template, pipeline=pipe)
+    assert read_state(state_path)["videos"][0]["work_dir"] == str(crash_dir)
+
+    pipe2 = FakePipeline()
+    run_batch("https://a.com/1", settings, template, pipeline=pipe2)
+    assert pipe2.seen[0].resume_dir == str(crash_dir)
+
+
+def test_missing_work_dir_falls_back_to_fresh_run(env, tmp_path):
+    """Thư mục dở dang đã bị xóa tay → chạy lại như video mới, không đổ lỗi."""
+    settings, template, _ = env
+    gone = str(tmp_path / "da_xoa")
+    pipe = FakePipeline({"https://a.com/1": RuntimeError("x")},
+                        work_dirs={"https://a.com/1": gone})
+    run_batch("https://a.com/1", settings, template, pipeline=pipe)
+
+    pipe2 = FakePipeline()
+    run_batch("https://a.com/1", settings, template, pipeline=pipe2)
+    assert pipe2.seen[0].resume_dir is None
 
 
 def test_empty_list_does_nothing(env):

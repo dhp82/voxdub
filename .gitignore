@@ -6,45 +6,48 @@ build/
 dist/
 .pytest_cache/
 
-# Virtualenvs
+# Virtualenvs (tao boi cac script trong scripts/)
 .venv/
-.venv-gpu/
-.venv-asr/
-.venv-vieneu/
+.venv-*/
 venv/
 
-# Config with personal keys — copy .env.example to .env and fill in
+# Cau hinh ca nhan — chep .env.example thanh .env roi dien
 .env
 
-# Pipeline artifacts
+# Ket qua chay pipeline
 output/
 downloads/
 batch_state.json
 logs/
 
-# Du lieu ca nhan — danh sach URL Douyin dang xu ly
+# Du lieu ca nhan
 linkdouyin.txt
 
 # Models (nhieu GB; tai ve bang cac script trong scripts/)
 models/
 
-# Giong mau nguoi dung tu them (tep .wav nang)
-voices/
+# Giong nguoi dung tu them (voices/preset_voices_vn/ VAN duoc commit)
+voices/custom/
+voices/*.wav
 
 # OS / editor
 .DS_Store
 Thumbs.db
 .vscode/
 .idea/
+.claude/
 
 # Build exe
 *.spec.bak
 pw-browsers/
 smoke_test_result.json
+smoke_err.txt
 
-# Control server runtime state (VPS-side)
-control_server/state.json
-control_server/access.log
-control_server/access.log.1
-control_server/config.cmd
-control_server/start_server.cmd
+# Backend (chay tren may chu rieng)
+control_server/node_modules/
+control_server/.env
+control_server/logs/
+
+# Website
+website/node_modules/
+website/dist/

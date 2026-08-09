@@ -21,7 +21,7 @@ from PySide6.QtWidgets import (
 
 from autodub.config import Settings
 from autodub_gui import icons, theme, tokens
-from autodub_gui.remote_gate import check_remote_gate
+from autodub_gui.startup_check import check_startup
 from autodub_gui.run_state import REGISTRY
 from autodub_gui.shell import AppHeader, NotificationPopup, Sidebar
 from autodub_gui.ui.modal import ConfirmDialog
@@ -30,36 +30,68 @@ from autodub_gui.ui.toast import TOASTS
 
 APP_NAME = "VoxDub Studio"
 APP_TAGLINE = "Lồng tiếng video bằng AI"
-APP_VERSION = "2.1"
+APP_VERSION = "3.0.0"
 
 # -- Danh mục trang ----------------------------------------------------
 ROW_HOME, ROW_NEW, ROW_PROJECTS, ROW_BATCH, ROW_DOWNLOAD = 0, 1, 2, 3, 4
 ROW_SETTINGS, ROW_HELP = 5, 6
-ROW_EDITOR = 7          # trang ngữ cảnh, không nằm trong thanh bên
+ROW_EDITOR = 7          # trang ngữ cảnh (ẩn header khi mở)
 
-PAGE_COUNT = 8
+# Trang công cụ (mới — trang riêng, không phải shortcut vào Settings)
+ROW_VOICE    = 8    # Giọng đọc AI
+ROW_TRANSLATE = 9   # Dịch thuật
+ROW_SUBTITLE  = 10  # Phụ đề
+ROW_QUALITY   = 11  # Báo cáo chất lượng
+
+# Trang launcher editor (trung gian — không hiện trong sidebar)
+ROW_EDITOR_LAUNCHER = 12
+
+ROW_ACCOUNT = 13    # Tài khoản: ví Vox, kích hoạt mã, lịch sử
+
+PAGE_COUNT = 14
 
 # (số thứ tự, nhãn ở thanh bên, tiêu đề trang, mô tả trang, biểu tượng, nhóm)
 PAGES: list[tuple[int, str, str, str, object, str]] = [
-    (ROW_HOME, "Trang chủ", "Chào {name}!",
+    # Nhóm "main" — LUỒNG LÀM VIỆC
+    (ROW_HOME,      "Trang chủ",         "Chào {name}!",
      "Biến video của bạn thành nội dung tiếng Việt tự nhiên",
      icons.home, "main"),
-    (ROW_NEW, "Tạo dự án", "Tạo dự án mới",
+    (ROW_NEW,       "Tạo dự án",         "Tạo dự án mới",
      "Lồng tiếng video chuyên nghiệp với AI",
      icons.file_plus, "main"),
-    (ROW_PROJECTS, "Dự án của tôi", "Dự án của tôi",
+    (ROW_PROJECTS,  "Dự án",             "Dự án của tôi",
      "Toàn bộ video đã và đang xử lý",
      icons.folder, "main"),
-    (ROW_BATCH, "Xử lý hàng loạt", "Xử lý hàng loạt",
+    (ROW_EDITOR,    "Trình chỉnh sửa",   "Trình chỉnh sửa",
+     "Chỉnh sửa phụ đề, giọng đọc và xuất video",
+     icons.edit, "main"),
+    (ROW_BATCH,     "Xử lý hàng loạt",   "Xử lý hàng loạt",
      "Lồng tiếng nhiều video cùng lúc",
      icons.layers, "main"),
-    (ROW_DOWNLOAD, "Tải xuống", "Tải xuống",
+    (ROW_DOWNLOAD,  "Tải xuống",         "Tải xuống",
      "Chỉ tải video về máy, không lồng tiếng",
      icons.download, "main"),
-    (ROW_SETTINGS, "Cài đặt", "Cài đặt",
+    # Nhóm "tools" — CÔNG CỤ (trang riêng)
+    (ROW_VOICE,     "Giọng đọc AI",      "Giọng đọc AI",
+     "Quản lý và tùy chỉnh giọng đọc",
+     icons.user, "tools"),
+    (ROW_TRANSLATE, "Dịch thuật",        "Dịch thuật",
+     "Cấu hình engine dịch và kết nối API",
+     icons.globe, "tools"),
+    (ROW_SUBTITLE,  "Phụ đề",            "Phụ đề",
+     "Tùy chỉnh kiểu dáng và bố cục phụ đề",
+     icons.captions, "tools"),
+    (ROW_QUALITY,   "Báo cáo chất lượng","Báo cáo chất lượng",
+     "Thống kê ASR, dịch thuật và cảnh báo timing",
+     icons.chart_bar, "tools"),
+    # Nhóm "second" — HỆ THỐNG
+    (ROW_ACCOUNT,   "Tài khoản",         "Tài khoản",
+     "Số Vox còn lại, kích hoạt mã và lịch sử sử dụng",
+     icons.user, "second"),
+    (ROW_SETTINGS,  "Cài đặt",           "Cài đặt",
      "Tùy chỉnh hệ thống theo nhu cầu của bạn",
      icons.gear, "second"),
-    (ROW_HELP, "Trợ giúp", "Trợ giúp",
+    (ROW_HELP,      "Trợ giúp",          "Trợ giúp",
      "Hướng dẫn, khắc phục sự cố, thông tin phiên bản",
      icons.help_circle, "second"),
 ]
@@ -76,14 +108,16 @@ _BREAKPOINTS = (
 
 _MIN_W, _MIN_H = 1024, 680
 _START_W, _START_H = 1360, 820
-_GATE_INTERVAL_MS = 30 * 60 * 1000
+_STARTUP_RECHECK_MS = 30 * 60 * 1000
 _SMOKE_DELAY_MS = 1500
 _VIDEO_PROBE_MS = 4000     # thời gian chờ tối đa khi thử giải mã video
 
 # Dựng sẵn các trang sau khi cửa sổ hiện lên: trang hay dùng trước, trang
 # nặng nhất (Cài đặt) dựng sớm để lần bấm đầu tiên không phải chờ.
 _PREWARM_ORDER = (ROW_HELP, ROW_SETTINGS, ROW_NEW, ROW_PROJECTS,
-                  ROW_BATCH, ROW_DOWNLOAD, ROW_EDITOR)
+                  ROW_BATCH, ROW_DOWNLOAD, ROW_EDITOR,
+                  ROW_VOICE, ROW_TRANSLATE, ROW_SUBTITLE, ROW_QUALITY,
+                  ROW_EDITOR_LAUNCHER, ROW_ACCOUNT)
 _PREWARM_START_MS = 700     # chờ khung hình đầu vẽ xong rồi mới dựng
 _PREWARM_GAP_MS = 250       # nghỉ giữa hai trang để giao diện luôn mượt
 _PREFLIGHT_DELAY_MS = 1200  # kiểm tra máy sau khi cửa sổ đã hiện xong
@@ -101,8 +135,11 @@ class MainWindow(QMainWindow):
         self.setWindowTitle(APP_NAME)
         self.resize(_START_W, _START_H)
         self.setMinimumSize(_MIN_W, _MIN_H)
-        self._gate_watcher: QThread | None = None
+        self._startup_watcher: QThread | None = None
         self._status_worker: QThread | None = None
+        from autodub_gui.credit_widget import CreditWidget
+        self.credit_badge = CreditWidget()
+        self.credit_badge.clicked.connect(lambda: self.switch_page(ROW_ACCOUNT))
         self._force_close = False
         self._breakpoint = ""
         self._page_widgets: dict[int, QWidget] = {}
@@ -172,22 +209,34 @@ class MainWindow(QMainWindow):
 
     # -- Dựng giao diện ------------------------------------------------
     def _build_sidebar(self) -> Sidebar:
-        main = [(p[0], p[1], p[4]) for p in PAGES if p[5] == "main"]
-        second = [(p[0], p[1], p[4]) for p in PAGES if p[5] == "second"]
-        sidebar = Sidebar(main, second, APP_VERSION)
+        from autodub.saas_client import is_configured
+
+        # Chạy thuần trên máy thì không có ví Vox — trang Tài khoản chỉ toàn
+        # ô trống, giấu đi thay vì để người dùng bấm vào rồi ngơ ngác.
+        rows = [p for p in PAGES
+                if p[0] != ROW_ACCOUNT or is_configured()]
+        main   = [(p[0], p[1], p[4]) for p in rows if p[5] == "main"]
+        tools  = [(p[0], p[1], p[4]) for p in rows if p[5] == "tools"]
+        second = [(p[0], p[1], p[4]) for p in rows if p[5] == "second"]
+        sidebar = Sidebar(main, tools, second, APP_VERSION)
         sidebar.page_requested.connect(self.switch_page)
-        sidebar.tool_selected.connect(self._open_tool)
         sidebar.settings_requested.connect(lambda: self.switch_page(ROW_SETTINGS))
         sidebar.account_requested.connect(self._open_display_name_setting)
         sidebar.status_card.recheck_requested.connect(self.refresh_system_status)
         return sidebar
 
     def _open_tool(self, key: str) -> None:
-        """Mục CÔNG CỤ ở thanh bên: nhảy thẳng vào đúng tab của Cài đặt."""
-        self.switch_page(ROW_SETTINGS)
-        page = self._page_widgets.get(ROW_SETTINGS)
-        if page is not None and hasattr(page, "open_tool"):
-            page.open_tool(key)
+        """Compat: nếu còn code cũ gọi _open_tool, chuyển sang trang tương ứng."""
+        mapping = {"voice": ROW_VOICE, "translate": ROW_TRANSLATE,
+                   "subtitle": ROW_SUBTITLE}
+        row = mapping.get(key, ROW_SETTINGS)
+        if row == ROW_SETTINGS:
+            self.switch_page(ROW_SETTINGS)
+            page = self._page_widgets.get(ROW_SETTINGS)
+            if page is not None and hasattr(page, "open_tool"):
+                page.open_tool(key)
+        else:
+            self.switch_page(row)
 
     def _build_content(self) -> QWidget:
         content = QWidget()
@@ -199,6 +248,9 @@ class MainWindow(QMainWindow):
         self.header = AppHeader()
         self.header.notifications_clicked.connect(self._show_notifications)
         self.header.help_clicked.connect(lambda: self.switch_page(ROW_HELP))
+        # Huy hiệu Vox nằm cố định trên thanh tiêu đề (không phải nút của
+        # từng trang) — người dùng phải thấy tài nguyên của mình ở mọi trang.
+        self.header.set_persistent(self.credit_badge)
         layout.addWidget(self.header)
 
         self.pages = QStackedWidget()
@@ -244,6 +296,7 @@ class MainWindow(QMainWindow):
             page.settings_needed.connect(lambda _m: self.switch_page(ROW_SETTINGS))
             page.edit_requested.connect(self.open_editor)
             page.home_requested.connect(lambda: self.switch_page(ROW_HOME))
+            page.balance_changed.connect(self.credit_badge.set_balance)
         elif row == ROW_PROJECTS:
             from autodub_gui.pages.projects_page import ProjectsPage
             page = ProjectsPage(self._fresh_settings, self.pages)
@@ -265,15 +318,44 @@ class MainWindow(QMainWindow):
             from autodub_gui.pages.help_page import HelpPage
             page = HelpPage(self._fresh_settings, self.pages)
             page.settings_requested.connect(lambda: self.switch_page(ROW_SETTINGS))
-        else:
+        elif row == ROW_EDITOR:
             from autodub_gui.pages.editor_page import EditorPage
             page = EditorPage(self._fresh_settings, self.pages)
             page.settings_needed.connect(lambda _m: self.switch_page(ROW_SETTINGS))
             page.close_requested.connect(lambda: self.switch_page(ROW_PROJECTS))
+        elif row == ROW_VOICE:
+            from autodub_gui.pages.voice_tool_page import VoiceToolPage
+            page = VoiceToolPage(self._fresh_settings, self.pages)
+        elif row == ROW_TRANSLATE:
+            from autodub_gui.pages.translate_tool_page import TranslateToolPage
+            page = TranslateToolPage(self._fresh_settings, self.pages)
+        elif row == ROW_SUBTITLE:
+            from autodub_gui.pages.subtitle_tool_page import SubtitleToolPage
+            page = SubtitleToolPage(self._fresh_settings, self.pages)
+        elif row == ROW_QUALITY:
+            from autodub_gui.pages.quality_page import QualityPage
+            page = QualityPage(self._fresh_settings, self.pages)
+        elif row == ROW_ACCOUNT:
+            from autodub_gui.pages.account_page import AccountPage
+            page = AccountPage(self._fresh_settings, self.pages)
+            page.balance_changed.connect(self.credit_badge.set_balance)
+        elif row == ROW_EDITOR_LAUNCHER:
+            from autodub_gui.pages.editor_launcher_page import EditorLauncherPage
+            page = EditorLauncherPage(self._fresh_settings, self.pages)
+            page.open_requested.connect(self.open_editor)
+        else:
+            from autodub_gui.ui.empty import EmptyState
+            page = EmptyState("Trang không xác định", f"ROW={row}")
         return page
 
     def switch_page(self, row: int) -> None:
         """Chuyển sang một trang, có hỏi trước nếu trang cũ còn việc dở."""
+        # ROW_EDITOR đặc biệt: nếu chưa có project mở → vào launcher
+        if row == ROW_EDITOR:
+            editor = self._page_widgets.get(ROW_EDITOR)
+            if editor is None or not getattr(editor, "_work_dir", ""):
+                row = ROW_EDITOR_LAUNCHER
+
         current = self.pages.currentWidget()
         if current is not None and self._blocked_by_unsaved(current):
             self.sidebar.select_row(self._row_of(current))
@@ -304,7 +386,7 @@ class MainWindow(QMainWindow):
 
     def _apply_header(self, row: int) -> None:
         """Đổi tiêu đề, ẩn thanh tiêu đề khi vào Trình chỉnh sửa."""
-        if row == ROW_EDITOR:
+        if row in (ROW_EDITOR, ROW_EDITOR_LAUNCHER):
             self.header.setVisible(False)
             return
         self.header.setVisible(True)
@@ -335,7 +417,14 @@ class MainWindow(QMainWindow):
         if not work_dir:
             return
         self.switch_page(ROW_EDITOR)
-        self._ensure_page(ROW_EDITOR).open_work_dir(work_dir)
+        editor = self._ensure_page(ROW_EDITOR)
+        editor.open_work_dir(work_dir)
+        # Cập nhật launcher banner để hiện project đang mở
+        launcher = self._page_widgets.get(ROW_EDITOR_LAUNCHER)
+        if launcher and hasattr(launcher, "set_current_project"):
+            from pathlib import Path
+            title = Path(work_dir).stem
+            launcher.set_current_project(work_dir, title)
 
     def _start_new_project(self, file_path: str = "") -> None:
         """Sang trang Tạo dự án, điền sẵn tệp nếu người dùng vừa kéo thả."""
@@ -377,13 +466,20 @@ class MainWindow(QMainWindow):
 
     # -- Kiểm tra tiền chuyến bay --------------------------------------
     def _maybe_first_run(self) -> None:
-        """Hiện màn chào nếu đây là lần chạy đầu tiên trên máy này."""
-        from autodub_gui.first_run import maybe_show_first_run
-
+        """Hiện wizard cài đặt nếu đây là lần chạy đầu tiên trên máy này."""
         try:
-            maybe_show_first_run(self)
-        except Exception:  # noqa: BLE001 — màn chào hỏng không được chặn app
-            pass
+            from autodub_gui.setup_wizard import maybe_show_setup_wizard
+            showed = maybe_show_setup_wizard(self)
+        except Exception:  # noqa: BLE001 — wizard hỏng không được chặn app
+            showed = False
+
+        # Fallback: nếu wizard không hiện thì vẫn kiểm tra first_run cũ
+        if not showed:
+            try:
+                from autodub_gui.first_run import maybe_show_first_run
+                maybe_show_first_run(self)
+            except Exception:  # noqa: BLE001
+                pass
 
     def _check_updates(self) -> None:
         """Hỏi bản mới ở luồng nền; chỉ báo nhẹ khi thực sự có bản mới."""
@@ -502,10 +598,11 @@ class MainWindow(QMainWindow):
                 page.cleanup()
         # Chờ mọi QThread phụ xong — hủy QThread đang chạy lúc teardown
         # sẽ làm Qt crash cứng (exit code 0xC0000409).
-        for worker in (self._gate_watcher, self._status_worker,
+        for worker in (self._startup_watcher, self._status_worker,
                        self._preflight_worker, self._update_worker):
             if worker is not None and worker.isRunning():
                 worker.wait(5000)
+        self.credit_badge.wait_for_idle()
         event.accept()
 
 
@@ -532,7 +629,7 @@ def _smoke_report(window: MainWindow) -> int:
 
     from autodub.utils import app_root
 
-    for row in (*(p[0] for p in PAGES), ROW_EDITOR):
+    for row in (*(p[0] for p in PAGES), ROW_EDITOR, ROW_EDITOR_LAUNCHER):
         window._ensure_page(row)
 
     settings = Settings.load(override=True)
@@ -548,7 +645,7 @@ def _smoke_report(window: MainWindow) -> int:
         "ffprobe_found": bool(shutil.which("ffprobe")),
         "vieneu_installed": settings.vieneu_configured(),
         "voice_count": len(catalog(settings)),
-        "translate_configured": settings.translate_configured(),
+        "translate_enabled": settings.translate_enabled,
         "worker_scripts_found": all(os.path.isfile(p) for p in (
             __import__("autodub.speech.tts.vieneu_vi",
                        fromlist=["_WORKER_SCRIPT"])._WORKER_SCRIPT,
@@ -605,9 +702,9 @@ def _probe_optional_imports(checks: dict) -> None:
         from autodub.speech.tts.voices import catalog  # noqa: F401
         from autodub.text.ass_karaoke import build_karaoke_ass  # noqa: F401
         from autodub.text.subtitles import refresh_subtitles  # noqa: F401
-        from autodub.text.translate_analysis import analyze_transcript  # noqa: F401
-        from autodub.text.translate_openai import translate_segments  # noqa: F401
+        from autodub.saas_client import SaasClient  # noqa: F401
         from autodub.text.translate_review import review_translations  # noqa: F401
+        from autodub.text.translate_saas import translate_segments  # noqa: F401
     except Exception as e:  # noqa: BLE001
         checks["new_modules_importable"] = False
         checks["new_modules_error"] = str(e)
@@ -680,37 +777,66 @@ def _probe_env_file(checks: dict) -> None:
         checks["env_error"] = str(e)
 
 
-def _install_gate_watch(window: MainWindow) -> QTimer:
-    """Kiểm tra khóa từ xa định kỳ; lỗi mạng thì bỏ qua, không chặn người dùng."""
+def _install_startup_watch(window: MainWindow) -> QTimer:
+    """Hỏi máy chủ lúc khởi động rồi định kỳ nửa tiếng một lần.
 
-    class _GateWatcher(QThread):
+    Fail-closed lúc MỞ APP: không liên lạc được máy chủ thì không vào —
+    chỉ có Thử lại hoặc Thoát. Nhưng GIỮA PHIÊN thì mất mạng không đá
+    người dùng ra (đang xuất video mà rớt wifi không phải lỗi của họ);
+    chỉ lệnh rõ ràng từ máy chủ — bảo trì, app quá cũ — mới đóng app.
+    """
+
+    class _StartupWatcher(QThread):
         def __init__(self, parent):
             super().__init__(parent)
             self.result = None
 
         def run(self):
-            self.result = check_remote_gate()
+            self.result = check_startup(APP_VERSION)
 
-    def _recheck() -> None:
-        old = window._gate_watcher
+    def _recheck(initial: bool = False) -> None:
+        old = window._startup_watcher
         if old is not None and old.isRunning():
             return
-        watcher = _GateWatcher(window)
+        watcher = _StartupWatcher(window)
 
         def _done():
             result = watcher.result
-            if result is not None and not result.allowed:
-                QMessageBox.critical(window, APP_NAME, result.message)
+            if result is None:
+                return
+            if not result.allowed:
+                if result.offline:
+                    if not initial:
+                        return  # rớt mạng giữa phiên: lần kiểm tra sau tự xử
+                    box = QMessageBox(window)
+                    box.setIcon(QMessageBox.Icon.Critical)
+                    box.setWindowTitle(APP_NAME)
+                    box.setText(result.message)
+                    retry = box.addButton("Thử lại", QMessageBox.ButtonRole.AcceptRole)
+                    box.addButton("Thoát", QMessageBox.ButtonRole.RejectRole)
+                    box.exec()
+                    if box.clickedButton() is retry:
+                        _recheck(initial=True)
+                        return
+                else:
+                    QMessageBox.critical(window, APP_NAME, result.message)
                 window._force_close = True
                 window.close()
+                return
+            config = result.config or {}
+            window.credit_badge.set_credit_enabled(
+                bool(config.get("creditEnabled", True)))
+            device = result.device or {}
+            if device:
+                window.credit_badge.set_balance(int(device.get("balance", 0)))
 
         watcher.finished.connect(_done)
-        window._gate_watcher = watcher
+        window._startup_watcher = watcher
         watcher.start()
 
-    QTimer.singleShot(0, _recheck)
+    QTimer.singleShot(0, lambda: _recheck(initial=True))
     timer = QTimer(window)
-    timer.setInterval(_GATE_INTERVAL_MS)
+    timer.setInterval(_STARTUP_RECHECK_MS)
     timer.timeout.connect(_recheck)
     timer.start()
     return timer
@@ -754,11 +880,37 @@ def main() -> int:
     from autodub_gui.crash import install_crash_handler
     install_crash_handler()
 
-    Settings.load()
+    # Tạo .env từ .env.example nếu chưa có — tránh Settings.load() dùng toàn
+    # giá trị mặc định mà không ghi lại được gì cho lần sau.
+    from autodub.utils import app_root as _app_root
+    _env_path = os.path.join(_app_root(), ".env")
+    _env_example = os.path.join(_app_root(), ".env.example")
+    if not os.path.isfile(_env_path) and os.path.isfile(_env_example):
+        import shutil as _shutil
+        try:
+            _shutil.copy(_env_example, _env_path)
+        except OSError:
+            pass
+
+    # Nếu người dùng (hoặc wizard) đã tải FFmpeg về bin/ thì thêm ngay vào PATH
+    # để shutil.which("ffmpeg") và preflight tìm thấy ngay trong cùng phiên.
+    _local_bin = os.path.join(_app_root(), "bin")
+    if os.path.isdir(_local_bin):
+        _cur_path = os.environ.get("PATH", "")
+        if _local_bin.lower() not in _cur_path.lower():
+            os.environ["PATH"] = _local_bin + os.pathsep + _cur_path
+
+    settings = Settings.load()
     window = MainWindow()      # phím tắt được cửa sổ tự đăng ký khi dựng
     window.show()
 
-    gate_timer = _install_gate_watch(window)
+    # Tải + enroll voice library nếu chưa có (chỉ khi VieNeu đã cài).
+    # Chạy SAU window.show() để app loop đã khởi động, dialog mới hiển thị đúng.
+    if os.environ.get("AUTODUB_SMOKE") != "1":
+        from autodub_gui.voice_setup_dialog import VoiceSetupDialog
+        VoiceSetupDialog.ensure_voices(settings, window)
+
+    startup_timer = _install_startup_watch(window)
 
     if os.environ.get("AUTODUB_SMOKE") == "1":
         result = {"code": 1}
@@ -767,12 +919,13 @@ def main() -> int:
             try:
                 result["code"] = _smoke_report(window)
             finally:
-                gate_timer.stop()
+                startup_timer.stop()
                 # app.quit() không đi qua closeEvent — tự chờ luồng kiểm tra
-                # khóa từ xa ở đây, không thì teardown crash (0xC0000409).
-                watcher = window._gate_watcher
+                # máy chủ ở đây, không thì teardown crash (0xC0000409).
+                watcher = window._startup_watcher
                 if watcher is not None and watcher.isRunning():
                     watcher.wait(10000)
+                window.credit_badge.wait_for_idle(10000)
                 app.quit()
 
         QTimer.singleShot(_SMOKE_DELAY_MS, _run_smoke)

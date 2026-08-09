@@ -83,6 +83,13 @@ def load_work_dir(work_dir: str, target_key: str = "vi") -> EditorState:
     """Load the translated segments and context for editing."""
     if not os.path.isdir(work_dir):
         raise EditorError(f"Work directory not found: {work_dir}")
+    from autodub import securestore
+    if securestore.is_locked(work_dir):
+        # Dự án wizard chưa bấm Xuất video — dữ liệu trả phí còn mã hóa.
+        raise EditorError(
+            "Dự án chưa xuất video nên chưa mở được trong Trình chỉnh sửa. "
+            "Mở dự án ở tab Dự án mới và bấm Xuất video trước đã."
+        )
     target = get_target(target_key)
     path = _transcript_path(work_dir, target)
     if not os.path.exists(path):
@@ -190,6 +197,40 @@ def _save_field(work_dir: str, edits: dict[int, str], target_key: str,
     return sorted(changed)
 
 
+def set_segment_voice(work_dir: str, seg_id: int, voice: str,
+                      target_key: str = "vi") -> bool:
+    """Gán (hoặc bỏ) giọng đọc riêng cho MỘT câu.
+
+    ``voice`` rỗng nghĩa là câu quay về giọng chung của dự án — khóa
+    ``"voice"`` bị xóa hẳn để tệp lời thoại không phình vì dữ liệu thừa.
+    Trả về True nếu có thay đổi thật (GUI dựa vào đó để đánh dấu câu cần
+    đọc lại giọng).
+    """
+    target = get_target(target_key)
+    path = _transcript_path(work_dir, target)
+    if not os.path.exists(path):
+        raise EditorError(f"Chưa có bản dịch trong dự án này "
+                          f"({target.transcript_name})")
+    with open(path, encoding="utf-8") as f:
+        segments = json.load(f)
+    seg = next((s for s in segments if s.get("id") == int(seg_id)), None)
+    if seg is None:
+        raise EditorError(f"Không tìm thấy câu số: {seg_id}")
+
+    voice = (voice or "").strip()
+    if voice:
+        if str(seg.get("voice", "")) == voice:
+            return False
+        seg["voice"] = voice
+    else:
+        if "voice" not in seg:
+            return False
+        seg.pop("voice")
+    save_json_atomic(segments, path)
+    logger.info(f"Câu {seg_id}: giọng riêng = {voice or '(giọng chung)'}")
+    return True
+
+
 def _stale_derived_paths(work_dir: str, target: TargetLang, seg_id: int) -> list[str]:
     """Files that no longer match a re-synthesized segment and must be removed.
 
@@ -260,6 +301,12 @@ def resynth_segment(
     if not text:
         raise EditorError(f"Segment {seg_id} has no translated text to synthesize")
 
+    # Câu có giọng riêng thì đọc bằng giọng đó — nhưng chỉ khi synth do chính
+    # hàm này tạo; synth truyền vào là do nơi gọi đã gom nhóm theo giọng.
+    seg_voice = str(seg.get("voice", "")).strip()
+    if synth is None and seg_voice:
+        voice = seg_voice
+
     seg_dir = data_path(work_dir, "segments", create_dir=True)
     os.makedirs(seg_dir, exist_ok=True)
     seg_path = seg_wav_path(seg_dir, seg["id"])
@@ -312,27 +359,54 @@ def resynth_segments(
     a plain callback so GUI workers can emit per-segment signals.
     """
     from autodub.speech.tts import get_synthesizer
+    from autodub.speech.tts import voices as voice_catalog
 
     results: dict[int, dict] = {}
     total = len(seg_ids)
     if not seg_ids:
         return results
-    synth = get_synthesizer(get_target(target_key), settings, voice)
 
-    try:
-        for i, seg_id in enumerate(seg_ids, 1):
-            if reporter is not None:
-                reporter.check_cancelled()
-                reporter.emit("tts", "progress", current=i, total=total)
-            results[seg_id] = resynth_segment(work_dir, seg_id, settings,
-                                              target_key, voice, synth=synth)
-            if on_progress is not None:
-                on_progress(i, total, seg_id)
-    finally:
-        # Release the worker subprocesses even on error/cancel — leaking a
-        # pool per "save all" strands GBs of RAM/VRAM in the GUI process.
-        if hasattr(synth, "close"):
-            synth.close()
+    # Gom câu theo giọng thật sự sẽ đọc: câu có khóa "voice" riêng dùng giọng
+    # đó, còn lại dùng giọng chung. Mỗi giọng chỉ nạp model MỘT lần.
+    target = get_target(target_key)
+    path = _transcript_path(work_dir, target)
+    with open(path, encoding="utf-8") as f:
+        segments = json.load(f)
+    voice_of = {s.get("id"): str(s.get("voice", "")).strip() for s in segments}
+    main_voice = voice_catalog.resolve(settings, voice)
+    by_voice: dict[str, list[int]] = {}
+    for seg_id in seg_ids:
+        name = voice_catalog.resolve(settings, voice_of.get(seg_id) or voice)
+        by_voice.setdefault(name, []).append(seg_id)
+    # Giọng chung đi trước để giữ thứ tự tiến độ quen thuộc.
+    voice_order = sorted(by_voice, key=lambda n: (n != main_voice, n))
+
+    done = 0
+    for name in voice_order:
+        ids = by_voice[name]
+        # Giọng phụ (vài câu lẻ) chỉ mở một tiến trình con — không nhân
+        # đôi RAM theo cả nhóm worker của giọng chung.
+        synth = get_synthesizer(
+            target, settings, name,
+            num_workers=None if name == main_voice else 1)
+        try:
+            for seg_id in ids:
+                if reporter is not None:
+                    reporter.check_cancelled()
+                    reporter.emit("tts", "progress",
+                                  current=done + 1, total=total)
+                results[seg_id] = resynth_segment(
+                    work_dir, seg_id, settings, target_key, name,
+                    synth=synth)
+                done += 1
+                if on_progress is not None:
+                    on_progress(done, total, seg_id)
+        finally:
+            # Release the worker subprocesses even on error/cancel — leaking
+            # a pool per "save all" strands GBs of RAM/VRAM in the GUI
+            # process.
+            if hasattr(synth, "close"):
+                synth.close()
     if reporter is not None and total:
         reporter.emit("tts", "done", current=total, total=total)
     return results
@@ -648,6 +722,120 @@ def rebuild_subtitles(
         reporter.emit("done", "done", detail=work_dir)
     logger.info(f"Đã ghi lại phụ đề vào video: {dubbed}")
     return dubbed
+
+
+def render_segment_preview(
+    work_dir: str, settings: Settings, seg_id: int, target_key: str = "vi",
+    bg_mode: str = "demucs", bg_duck_db: float = -12.0,
+    subtitle_mode: str | None = None, subtitle_style: dict | None = None,
+    pad_s: float = 1.0,
+) -> str:
+    """Dựng một đoạn XEM THỬ ngắn quanh câu ``seg_id``, trước khi xuất cả phim.
+
+    Xuất cả video để nghe thử một câu là quá đắt. Đường đi này chỉ cắt vài
+    giây video quanh câu đang chọn, trộn giọng đọc + nhạc nền của đúng khoảng
+    đó rồi mã hóa nhanh (ultrafast, tối đa 480 điểm ảnh) — vài giây là có
+    tệp xem được.
+
+    Giọng đọc lấy từ bản dẫn xuất CUỐI CÙNG đã có trên đĩa (đã hậu kỳ, đã
+    giãn nhịp — nếu dự án từng xuất); dự án chưa xuất lần nào thì dùng bản
+    thô, sai khác chút ít so với bản xuất thật. Phụ đề xem thử luôn là kiểu
+    cả câu (kiểu cụm chữ chỉ có ở bản xuất thật).
+
+    Trả về đường dẫn tệp mp4 xem thử trong thư mục data của dự án.
+    """
+    from autodub.media.audio import merge_segments, wav_duration_s
+    from autodub.media.video import render_preview_clip
+    from autodub.text.srt import generate_srt_styled
+    from autodub.utils import ffmpeg_timeout_s
+
+    state = load_work_dir(work_dir, target_key)
+    target, segments = state.target, state.segments
+    subtitle_mode, _blur, style = _render_options(
+        state, settings, subtitle_mode, None, subtitle_style)
+
+    seg = next((s for s in segments if s.get("id") == seg_id), None)
+    if seg is None:
+        raise EditorError(f"Không tìm thấy câu số {seg_id} trong dự án.")
+
+    _check_render_mode(work_dir)
+    # Cùng phép co giãn timeline với lượt xuất thật — dự án có làm chậm video
+    # thì mốc câu đã được đổi về timeline chậm, còn deferred trả (speed, fps)
+    # để làm chậm ngay trong lượt mã hóa xem thử.
+    video_path, deferred_speed = _apply_slowdown(work_dir, segments,
+                                                 state.video_path)
+    if not video_path:
+        raise EditorError("Thư mục dự án không còn video gốc nên không dựng "
+                          "được đoạn xem thử. Hãy chọn lại tệp video.")
+    seg = next(s for s in segments if s.get("id") == seg_id)
+
+    merge_dir = final_segments_dir(work_dir)
+    voice_dur = wav_duration_s(seg_wav_path(merge_dir, seg_id)) or 0.0
+    w0 = max(0.0, float(seg["start"]) - pad_s)
+    w1 = max(float(seg["end"]),
+             float(seg["start"]) + voice_dur) + pad_s
+
+    # Các câu chạm vào cửa sổ xem thử, mốc thời gian dời về 0 tại w0. Giọng
+    # của câu tràn vào từ trước cửa sổ vẫn được trộn (mốc âm được
+    # merge_segments cắt đúng phần lọt trong khối); riêng phụ đề thì kẹp về 0.
+    window = [dict(s, start=float(s["start"]) - w0, end=float(s["end"]) - w0)
+              for s in segments
+              if float(s["end"]) > w0 and float(s["start"]) < w1]
+    sub_window = [dict(s, start=max(0.0, s["start"]), end=min(s["end"], w1 - w0))
+                  for s in window]
+
+    background_path, background_gain_db = resolve_existing_background(
+        work_dir, bg_mode, bg_duck_db)
+    slowed_bg = data_path(work_dir, "slowed_background.wav")
+    if ((video_path == data_path(work_dir, "slowed_video.mp4")
+         or deferred_speed is not None) and os.path.isfile(slowed_bg)):
+        background_path = slowed_bg
+
+    # Cắt nhạc nền về đúng cửa sổ để merge_segments không phải trộn từ 0s.
+    bg_cut = None
+    if background_path and os.path.isfile(background_path):
+        import subprocess
+        bg_cut = data_path(work_dir, "preview_bg.tmp.wav")
+        result = subprocess.run(
+            ["ffmpeg", "-y", "-ss", f"{w0:.3f}", "-to", f"{w1:.3f}",
+             "-i", background_path, "-acodec", "pcm_s16le", bg_cut],
+            capture_output=True, text=True,
+            timeout=ffmpeg_timeout_s(w1 - w0))
+        if result.returncode != 0 or not os.path.getsize(bg_cut):
+            logger.warning("Không cắt được nhạc nền cho đoạn xem thử — "
+                           "dùng nền im lặng")
+            bg_cut = None
+
+    preview_audio = data_path(work_dir, "preview_audio.tmp.wav")
+    preview_path = data_path(work_dir, f"preview_seg{seg_id:05d}.mp4")
+    srt_tmp = None
+    try:
+        merge_segments(window, merge_dir, preview_audio, w1 - w0,
+                       background_path=bg_cut,
+                       background_gain_db=background_gain_db,
+                       duck_voice_db=settings.bg_duck_voice_db)
+        if subtitle_mode == "burn":
+            srt_tmp = data_path(work_dir, "preview_subs.tmp.srt")
+            generate_srt_styled(sub_window, srt_tmp, target.text_field, style)
+
+        # Cửa sổ tính trên timeline ĐÃ làm chậm; đường deferred cắt trên tệp
+        # nguồn (timeline gốc) rồi làm chậm trong chính lượt mã hóa này.
+        speed = deferred_speed[0] if deferred_speed else None
+        fps = deferred_speed[1] if deferred_speed else None
+        vs0, vs1 = (w0 * speed, w1 * speed) if speed else (w0, w1)
+        render_preview_clip(video_path, preview_audio, preview_path,
+                            vs0, vs1, srt_path=srt_tmp, subtitle_style=style,
+                            speed=speed, fps=fps)
+    finally:
+        for tmp in (preview_audio, bg_cut, srt_tmp):
+            if tmp and os.path.exists(tmp):
+                try:
+                    os.remove(tmp)
+                except OSError:
+                    pass
+
+    logger.info(f"Đã dựng đoạn xem thử câu {seg_id}: {preview_path}")
+    return preview_path
 
 
 # ---------------------------------------------------------------------------
@@ -975,3 +1163,78 @@ def set_segment_time(work_dir: str, seg_id: int, start: float, end: float,
     save_json_atomic(segments, path)
     logger.info(f"Đã đổi mốc thời gian câu số {seg_id} thành "
                 f"{start:.3f} tới {end:.3f} giây")
+
+
+# --- Lịch sử bản xuất -------------------------------------------------------
+# Giữ tối đa 3 bản dubbed_video gần nhất trong data/export_history/ để người
+# dùng có thể quay lại bản cũ nếu lần xuất mới có vấn đề.
+_EXPORT_HISTORY_DIR = "export_history"
+_MAX_HISTORY = 3
+
+
+def record_export_snapshot(work_dir: str) -> None:
+    """Chụp bản dubbed_video.mp4 hiện tại vào lịch sử trước khi xuất đè.
+
+    Gọi SAU khi lần xuất mới thành công — snapshot là bản vừa tạo ra, không
+    phải bản đang sắp bị ghi đè (giữ bản tốt nhất, không phải bản sắp mất).
+    Hỏng thì bỏ qua vì đây chỉ là tiện ích phụ.
+    """
+    import shutil
+    import time
+
+    src = os.path.join(work_dir, "dubbed_video.mp4")
+    if not os.path.isfile(src):
+        return
+    try:
+        hist_dir = data_path(work_dir, _EXPORT_HISTORY_DIR, create_dir=True)
+        stamp = time.strftime("%Y%m%d_%H%M%S")
+        dst = os.path.join(hist_dir, f"dubbed_{stamp}.mp4")
+        shutil.copy2(src, dst)
+        _prune_history(hist_dir)
+    except OSError:
+        pass
+
+
+def _prune_history(hist_dir: str) -> None:
+    """Xóa bớt, chỉ giữ _MAX_HISTORY bản mới nhất."""
+    try:
+        entries = sorted([
+            f for f in os.listdir(hist_dir)
+            if f.startswith("dubbed_") and f.endswith(".mp4")
+        ])
+        for old in entries[:-_MAX_HISTORY]:
+            try:
+                os.remove(os.path.join(hist_dir, old))
+            except OSError:
+                pass
+    except OSError:
+        pass
+
+
+def list_export_history(work_dir: str) -> list[dict]:
+    """Danh sách bản xuất đã lưu, mới nhất trước.
+
+    Mỗi phần tử: {"path": ..., "name": ..., "mtime": ..., "size_bytes": ...}.
+    """
+    try:
+        hist_dir = data_path(work_dir, _EXPORT_HISTORY_DIR)
+        if not os.path.isdir(hist_dir):
+            return []
+        entries = []
+        for f in os.listdir(hist_dir):
+            if f.startswith("dubbed_") and f.endswith(".mp4"):
+                p = os.path.join(hist_dir, f)
+                try:
+                    st = os.stat(p)
+                    entries.append({
+                        "path": p,
+                        "name": f,
+                        "mtime": st.st_mtime,
+                        "size_bytes": st.st_size,
+                    })
+                except OSError:
+                    pass
+        entries.sort(key=lambda x: x["mtime"], reverse=True)
+        return entries
+    except OSError:
+        return []

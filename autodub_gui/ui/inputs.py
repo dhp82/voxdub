@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import os
 
-from PySide6.QtCore import Qt, QTimer, Signal
+from PySide6.QtCore import QSize, Qt, QTimer, Signal
 from PySide6.QtWidgets import (
     QComboBox, QDoubleSpinBox, QFileDialog, QHBoxLayout, QLabel, QLineEdit,
     QSizePolicy, QSlider, QStyledItemDelegate, QVBoxLayout, QWidget,
@@ -19,6 +19,9 @@ from autodub_gui.ui.buttons import GhostButton
 _SEARCH_DEBOUNCE_MS = 250
 _SLIDER_SCALE = 100
 _LABEL_SPACING = 6
+#: Chiều cao một dòng trong bảng thả xuống — khớp `min-height` của
+#: `QComboBox QAbstractItemView::item` trong theme.py.
+_COMBO_ROW_H = 30
 
 
 def polish_combo(combo: QComboBox) -> None:
@@ -83,6 +86,22 @@ def polish_combo(combo: QComboBox) -> None:
     widest = max((metrics.horizontalAdvance(combo.itemText(i))
                   for i in range(combo.count())), default=0)
     view.setMinimumWidth(widest + tokens.SP_8)
+
+    # 5. Ép mọi dòng cùng MỘT chiều cao thật.
+    #    `min-height` trong QSS chỉ nới ô vẽ chứ không đổi bước nhảy giữa hai
+    #    dòng: Qt vẫn xếp dòng theo chiều cao của font, nên các dòng chồng
+    #    lên nhau trong khi popup lại được cấp chiều cao theo min-height —
+    #    kết quả là chữ dồn lên nửa trên, nửa dưới bỏ trống một mảng lớn.
+    #    Đặt uniformItemSizes + gán thẳng chiều cao cho từng dòng thì hai
+    #    con số này khớp nhau, popup ôm sát nội dung.
+    if hasattr(view, "setUniformItemSizes"):
+        view.setUniformItemSizes(True)
+    model = combo.model()
+    if model is not None:
+        size = model.index(0, 0).data(Qt.ItemDataRole.SizeHintRole)
+        row_h = max(_COMBO_ROW_H, size.height() if size is not None else 0)
+        for i in range(combo.count()):
+            combo.setItemData(i, QSize(0, row_h), Qt.ItemDataRole.SizeHintRole)
 
 
 class _Field(QWidget):

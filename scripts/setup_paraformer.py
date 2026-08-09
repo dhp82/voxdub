@@ -26,12 +26,20 @@ VENV_PY = os.path.join(VENV_DIR, "Scripts" if os.name == "nt" else "bin",
                        "python.exe" if os.name == "nt" else "python")
 MODEL_DIR = os.path.join(PROJECT_ROOT, "models", "paraformer-zh")
 MARKER = os.path.join(MODEL_DIR, "installed_ok.json")
+
+#: Phiên bản package ASR. Chốt trần major để lần cài sau không tự nhảy sang
+#: bản đổi API — numpy 3.x cũng chưa được sherpa-onnx hỗ trợ.
+_ASR_SPECS = ("sherpa-onnx<2.0", "numpy<3.0")
 WORKER = os.path.join(PROJECT_ROOT, "autodub", "speech",
                       "asr_paraformer_worker.py")
 if not os.path.isfile(WORKER):
-    # Bản đóng gói: worker nằm trong _internal của exe.
-    WORKER = os.path.join(PROJECT_ROOT, "_internal", "autodub", "speech",
-                          "asr_paraformer_worker.py")
+    # Bản đóng gói: worker nằm trong data/ (PyInstaller contents_directory).
+    for _d in ("data", "_internal"):
+        _candidate = os.path.join(PROJECT_ROOT, _d, "autodub", "speech",
+                                  "asr_paraformer_worker.py")
+        if os.path.isfile(_candidate):
+            WORKER = _candidate
+            break
 
 _GH = "https://github.com/k2-fsa/sherpa-onnx/releases/download"
 ASR_TARBALL = f"{_GH}/asr-models/sherpa-onnx-paraformer-zh-2023-09-14.tar.bz2"
@@ -93,7 +101,7 @@ def step_install() -> None:
         return
     log("cài sherpa-onnx + numpy (ONNX, không cần GPU) ...")
     subprocess.run([VENV_PY, "-m", "pip", "install", "--quiet",
-                    "sherpa-onnx", "numpy"], check=True)
+                    *_ASR_SPECS], check=True)
 
 
 def step_models() -> None:

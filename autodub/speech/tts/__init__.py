@@ -1,9 +1,10 @@
-"""Bộ tạo giọng đọc tiếng Việt — chỉ còn VieNeu.
+"""Bộ tạo giọng đọc tiếng Việt — hai engine: VieNeu (offline) và CapCut (API).
 
 ``get_synthesizer(target, settings, voice)`` trả về bộ tạo giọng cho MỘT tên
-giọng cụ thể (xem :mod:`autodub.speech.tts.voices`). Không còn khái niệm
-"engine" hay "giọng nam / giọng nữ": mọi nơi trong ứng dụng đều truyền thẳng
-tên giọng, giới tính chỉ là bộ lọc trong giao diện.
+giọng cụ thể (xem :mod:`autodub.speech.tts.voices`). Người dùng không chọn
+"engine" mà chọn thẳng TÊN giọng; tên thuộc bộ CapCut thì đi đường API, còn
+lại chạy VieNeu trên máy. Hai engine độc lập — không engine nào dự phòng cho
+engine kia.
 """
 from __future__ import annotations
 
@@ -59,15 +60,31 @@ def get_synthesizer(
     target: TargetLang,
     settings: Settings,
     voice: str | None = None,
+    num_workers: int | None = None,
 ) -> Synthesizer:
-    """Bộ tạo giọng VieNeu cho tên giọng đang chọn."""
+    """Bộ tạo giọng ứng với tên giọng đang chọn.
+
+    ``num_workers`` ghi đè số tiến trình con — dùng cho giọng phụ (một vài
+    câu gán giọng riêng) để không nhân đôi RAM theo cả nhóm worker. Giọng
+    CapCut bỏ qua tham số này (số luồng do ``recommended_threads`` quyết).
+    """
+    voice_name = voice_catalog.resolve(settings, voice)
+
+    if voice_catalog.is_capcut_voice(voice_name):
+        from autodub.speech.tts.capcut_vi import CapCutSynthesizer
+
+        logger.info(f"Dùng giọng CapCut «{voice_name}» (qua mạng)")
+        return CapCutSynthesizer(settings, voice_name=voice_name)
+
+    # Chỉ nhánh offline mới cần VieNeu — kiểm tra ở đây chứ không phải đầu
+    # hàm, nếu không máy chưa cài VieNeu sẽ bị chặn oan cả giọng CapCut.
     if not settings.vieneu_configured():
         raise ConfigError(NOT_INSTALLED_HINT)
 
     from autodub.speech.tts.vieneu_vi import VieNeuSynthesizer
 
-    voice_name = voice_catalog.resolve(settings, voice)
-    workers = min(settings.parallel_workers, settings.vieneu_max_workers)
+    workers = num_workers or min(settings.parallel_workers,
+                                 settings.vieneu_max_workers)
     logger.info(f"Dùng giọng VieNeu «{voice_name}» ({workers} luồng, CPU)")
     return VieNeuSynthesizer(settings, voice_name=voice_name,
                              num_workers=workers)

@@ -2,83 +2,98 @@
 
 Mọi file giao diện đều lấy màu từ đây. Cấm viết mã màu hex ở nơi khác
 (bài kiểm thử `tests/test_ui_tokens.py` sẽ báo lỗi).
+
+Giao diện TỐI (dark theme) — phong cách Linear/Vercel/GitHub dark:
+nền than đậm, thẻ xám tối, accent chàm #6366f1, viền mảnh tinh tế.
 """
 from __future__ import annotations
 
 # -- Nền --------------------------------------------------------------
-BG_APP          = "#0a0a12"   # nền cửa sổ
-BG_SIDEBAR      = "#0c0c15"   # thanh bên (sâu hơn một bậc)
-BG_MAIN         = "#0d0d17"   # vùng nội dung
-BG_PANEL        = "#14141f"   # thẻ / khung nhóm
-BG_PANEL_HOVER  = "#1a1a28"
-BG_INPUT        = "#1b1b29"   # ô nhập, nút phụ
+BG_APP          = "#0e0e14"   # nền cửa sổ — than đen tím nhẹ
+BG_SIDEBAR      = "#16161e"   # thanh bên — tối hơn panel một chút
+BG_MAIN         = "#0e0e14"   # vùng nội dung
+BG_PANEL        = "#1a1a24"   # thẻ / khung nhóm
+BG_PANEL_HOVER  = "#22222e"   # hover nhẹ — xanh tint tối
+BG_INPUT        = "#1e1e2a"   # ô nhập
 
 # Nền phụ trợ (dẫn xuất, dùng trong bảng kiểu QSS)
-BG_INPUT_DISABLED = "#16161f"
-BG_BUTTON         = "#171722"
-BG_BUTTON_PRESSED = "#12121b"
-BG_VIDEO          = "#07070d"
-BG_SELECTED       = "#1f1f38"
-BG_SELECTED_SOFT  = "#1a1a2e"
+BG_INPUT_DISABLED = "#16161e"
+BG_BUTTON         = "#20202c"  # nút mặc định
+BG_BUTTON_PRESSED = "#2a2a48"  # nhấn → indigo tint tối
+BG_VIDEO          = "#0d0d14"  # sân khấu video — GIỮ TỐI (letterbox)
+BG_SELECTED       = "#2a2a48"  # nav item đang chọn — indigo tint tối
+BG_SELECTED_SOFT  = "#1e1e38"  # selected nhạt hơn (chip, badge, hover nhẹ)
 
 # -- Viền -------------------------------------------------------------
-BORDER_SUBTLE   = "#1f1f30"
-BORDER_DEFAULT  = "#26263c"
-BORDER_ACTIVE   = "#5b5fef"
-BORDER_BUTTON   = "#262640"
-BORDER_DANGER   = "#3a1c22"
-BORDER_UPLOAD   = "#34347a"
+BORDER_SUBTLE   = "#252534"   # viền rất nhạt — phân tách nhẹ
+BORDER_DEFAULT  = "#32324a"   # viền rõ hơn một chút
+BORDER_ACTIVE   = "#6366f1"
+BORDER_BUTTON   = "#32324a"   # viền nút — theo BORDER_DEFAULT
+BORDER_DANGER   = "#5a1f1f"
+BORDER_UPLOAD   = "#3a3a6a"
 
 # -- Màu chính --------------------------------------------------------
-PRIMARY         = "#5b5fef"
-PRIMARY_HOVER   = "#6e72f5"
-PRIMARY_DARK    = "#4548c4"
-PRIMARY_GRAD_B  = "#7a4ff0"   # điểm cuối dải chuyển sắc của nút chính
-PRIMARY_GRAD_B_HOVER = "#8b62f7"
-PRIMARY_DISABLED_BG  = "#202038"
+PRIMARY         = "#6366f1"
+PRIMARY_HOVER   = "#7577f3"   # sáng hơn một chút — trên nền tối đọc là hover
+PRIMARY_DARK    = "#4f46e5"
+PRIMARY_GRAD_B  = "#8b5cf6"   # điểm cuối dải chuyển sắc của nút chính
+PRIMARY_GRAD_B_HOVER = "#7c4ff0"
+PRIMARY_DISABLED_BG  = "#2a2a48"
 
 # -- Màu nhấn ---------------------------------------------------------
-ACCENT_BLUE     = "#7b93ff"
+ACCENT_BLUE     = "#4f6ef7"
 ACCENT_PURPLE   = "#8b5cf6"
-ACCENT_PURPLE_HOVER = "#9d73f8"
+ACCENT_PURPLE_HOVER = "#9b6ef8"
 
 # -- Chữ --------------------------------------------------------------
-TEXT_PRIMARY    = "#f0f0fa"
-TEXT_SECONDARY  = "#a0a2b8"
-TEXT_MUTED      = "#6e708a"
-TEXT_DISABLED   = "#47485e"
+TEXT_PRIMARY    = "#e8e8f0"   # trắng xanh nhẹ — dễ đọc trên nền tối
+TEXT_SECONDARY  = "#9090a8"   # xám tím vừa
+TEXT_MUTED      = "#606078"   # xám tối — hint, meta
+TEXT_DISABLED   = "#3e3e54"
 TEXT_ON_ACCENT  = "#ffffff"
 
 # -- Trạng thái -------------------------------------------------------
-SUCCESS         = "#69c983"
-WARNING         = "#e7aa47"
-DANGER          = "#f06a5e"
-PROCESSING      = "#7b7ff2"
+SUCCESS         = "#22c55e"   # xanh lá sáng hơn — đọc tốt trên nền tối
+WARNING         = "#f59e0b"
+DANGER          = "#f87171"   # đỏ sáng hơn — đọc tốt trên nền tối
+PROCESSING      = "#6366f1"
 
-# Nền huy hiệu (tối, độ tương phản thấp — KHÔNG dùng màu bão hòa làm nền)
-SUCCESS_BG      = "#12241a"
-WARNING_BG      = "#29200d"
-DANGER_BG       = "#2a1216"
-PROCESSING_BG   = "#191938"
-NEUTRAL_BG      = "#1b1b29"
-PURPLE_BG       = "#1d1440"
+# Nền huy hiệu (tối — chữ dùng màu trạng thái sáng)
+SUCCESS_BG      = "#0d2a18"
+WARNING_BG      = "#2a1e08"
+DANGER_BG       = "#2a0d0d"
+PROCESSING_BG   = "#1a1a38"
+NEUTRAL_BG      = "#1a1a24"
+PURPLE_BG       = "#1e1430"
 
 # -- Dải thời gian ----------------------------------------------------
-WAVEFORM         = "#5b5fef"
-WAVEFORM_LIGHT   = "#8b8ef7"
-PLAYHEAD         = "#e0518f"   # hồng tím, lấy mẫu từ ảnh tham chiếu
-SUB_BLOCK_BG     = "#5b4314"
-SUB_BLOCK_BORDER = "#927226"
-SUB_BLOCK_TEXT   = "#f2cf74"
-RULER_TEXT       = "#687589"
+WAVEFORM         = "#6366f1"
+WAVEFORM_LIGHT   = "#4a4c9a"
+PLAYHEAD         = "#ef4444"   # đỏ, lấy mẫu từ ảnh tham chiếu
+SUB_BLOCK_BG     = "#2a200a"
+SUB_BLOCK_BORDER = "#a07820"
+SUB_BLOCK_TEXT   = "#d4a840"
+RULER_TEXT       = "#606078"
+
+# Track đa kênh của timeline (theo ảnh tham chiếu)
+TRACK_ORIGINAL      = "#8b5cf6"   # Âm thanh gốc (tím)
+TRACK_ORIGINAL_BG   = "#1e1430"
+TRACK_VOICE         = "#22c55e"   # Giọng đọc AI (xanh lá)
+TRACK_VOICE_BG      = "#0d2018"
+TRACK_MUSIC         = "#ec4899"   # Nhạc nền (hồng)
+TRACK_MUSIC_BG      = "#2a0d1e"
+TRACK_VIDEO_BG      = "#14141e"   # dải khung hình video
+TRACK_LABEL_BG      = "#16161e"   # cột nhãn trái của timeline
+TRACK_LABEL_BORDER  = "#252534"
 
 # -- Khung xem trước kiểu phụ đề --------------------------------------
+# Canvas xem trước hiển thị KHUNG HÌNH VIDEO nên giữ nền tối.
 PREVIEW_CANVAS_BG   = "#141517"   # nền khung xem trước
 PREVIEW_GUIDE       = "#3f6fb5"   # đường canh vị trí chữ
 PREVIEW_BLUR_EDGE   = "#c2913a"   # viền vùng che
-PREVIEW_EMPTY_BG    = "#26282c"   # nền khi chưa lấy được khung hình
-PREVIEW_EMPTY_TEXT  = "#4a4d55"
-LOG_BG              = "#17181b"   # nền khung nhật ký
+PREVIEW_EMPTY_BG    = "#1a1a24"   # nền khi chưa lấy được khung hình
+PREVIEW_EMPTY_TEXT  = "#606078"
+LOG_BG              = "#12121a"   # nền khung nhật ký
 
 # -- Màu mặc định của chữ phụ đề ghi lên video -------------------------
 # Đây là màu của nội dung xuất ra, không phải màu giao diện, nhưng vẫn để ở
@@ -89,43 +104,43 @@ SUBTITLE_HIGHLIGHT_DEFAULT = "#FFD54A"
 SUBTITLE_BOXFILL_DEFAULT   = "#000000"   # khối nền mờ sau chữ
 
 # -- Thanh cuộn và rãnh trượt -----------------------------------------
-STEP_DONE_BG        = "#5b5fef"   # vòng tròn bước đã xong
-STEP_UPCOMING_BG    = "#22223a"   # vòng tròn bước chưa tới
-STEP_UPCOMING_TEXT  = "#8f91aa"
+STEP_DONE_BG        = "#6366f1"   # vòng tròn bước đã xong
+STEP_UPCOMING_BG    = "#22222e"   # vòng tròn bước chưa tới
+STEP_UPCOMING_TEXT  = "#606078"
 
-TRACK_BG        = "#26263e"
-SCROLL_HANDLE_HOVER = "#3d3d5c"
-BRAND_LOGO_BG   = "#26265c"
+TRACK_BG        = "#22222e"
+SCROLL_HANDLE_HOVER = "#44445a"
+BRAND_LOGO_BG   = "#1a1a38"
 
 # -- Thẻ giọng đọc & chip lọc -----------------------------------------
-CHIP_BG            = "#1b1b29"   # nền chip lọc (thường)
-CHIP_BG_ACTIVE     = "#232345"   # nền chip đang chọn
-CHIP_BORDER_ACTIVE = "#5b5fef"   # viền chip đang chọn (= PRIMARY)
-VOICE_SELECTED_BG  = "#191932"   # nền thẻ giọng đang chọn
-SECTION_LABEL      = "#55566e"   # chữ CÔNG CỤ / HỆ THỐNG trong thanh bên
+CHIP_BG            = "#1a1a24"   # nền chip lọc (thường)
+CHIP_BG_ACTIVE     = "#1a1a38"   # nền chip đang chọn
+CHIP_BORDER_ACTIVE = "#6366f1"   # viền chip đang chọn (= PRIMARY)
+VOICE_SELECTED_BG  = "#1a1a38"   # nền thẻ giọng đang chọn
+SECTION_LABEL      = "#606078"   # chữ CÔNG CỤ / HỆ THỐNG trong thanh bên
 
 # Cặp màu gradient cho vòng tròn chữ cái đầu (avatar giọng đọc).
 # Chọn cặp theo tên giọng bằng hàm băm ổn định để mỗi giọng luôn một màu.
 AVATAR_GRADIENTS = (
-    ("#5b5fef", "#8b5cf6"),
-    ("#e0518f", "#8b5cf6"),
-    ("#3ba7f0", "#5b5fef"),
-    ("#69c983", "#3ba78f"),
-    ("#e7aa47", "#f06a5e"),
-    ("#8b5cf6", "#e0518f"),
+    ("#6366f1", "#8b5cf6"),
+    ("#ec4899", "#8b5cf6"),
+    ("#3b82f6", "#6366f1"),
+    ("#22c55e", "#0ea5a4"),
+    ("#f59e0b", "#ef4444"),
+    ("#8b5cf6", "#ec4899"),
 )
 
 # -- Màu bán trong suốt dùng trong QSS (Qt nhận alpha 0..255) ----------
-NAV_SEL_GRAD_A  = "rgba(91,95,239,140)"    # mục đang chọn, phía trái
-NAV_SEL_GRAD_B  = "rgba(122,79,240,110)"   # mục đang chọn, phía phải
-NAV_HOVER_BG    = "rgba(255,255,255,9)"    # khoảng 3,5% trắng
-MODAL_OVERLAY   = "rgba(6,6,12,158)"       # khoảng 0,62 alpha
-DURATION_BADGE_BG = "rgba(0,0,0,184)"      # khoảng 0,72 alpha
-UPLOAD_GRAD_A   = "rgba(91,95,239,16)"     # nền thẻ tải lên, chàm khoảng 6%
-UPLOAD_GRAD_B   = "rgba(139,92,246,16)"    # nền thẻ tải lên, tím khoảng 6%
-DRAG_ACTIVE_BG  = "rgba(91,95,239,26)"     # khoảng 0,10 alpha
-PLAYER_BAR_BG   = "rgba(12,12,21,235)"     # khoảng 0,92 alpha
-SUBTITLE_BOX_BG = "rgba(0,0,0,140)"        # khoảng 0,55 alpha
+NAV_SEL_GRAD_A  = "rgba(99,102,241,45)"    # mục đang chọn, phía trái (pill nhạt — tối hơn trên dark)
+NAV_SEL_GRAD_B  = "rgba(99,102,241,35)"    # mục đang chọn, phía phải
+NAV_HOVER_BG    = "rgba(99,102,241,28)"    # hover — indigo tint ~11% trên nền tối
+MODAL_OVERLAY   = "rgba(0,0,0,180)"        # overlay tối hơn trên dark theme
+DURATION_BADGE_BG = "rgba(0,0,0,200)"      # đè lên thumbnail — giữ tối
+UPLOAD_GRAD_A   = "rgba(99,102,241,22)"    # nền thẻ tải lên, chàm ~9%
+UPLOAD_GRAD_B   = "rgba(139,92,246,22)"    # nền thẻ tải lên, tím ~9%
+DRAG_ACTIVE_BG  = "rgba(99,102,241,40)"    # khoảng 0,16 alpha
+PLAYER_BAR_BG   = "rgba(22,22,30,230)"     # thanh điều khiển tối mờ
+SUBTITLE_BOX_BG = "rgba(0,0,0,140)"        # đè lên video — giữ tối
 
 # -- Bo góc -----------------------------------------------------------
 RADIUS_SM = 6
@@ -158,7 +173,7 @@ CARD_MIN_W       = 240
 # -- Đổ bóng (Qt dùng QGraphicsDropShadowEffect) ----------------------
 SHADOW_BLUR   = 24
 SHADOW_Y      = 8
-SHADOW_ALPHA  = 46      # tương đương rgba(0,0,0,.18)
+SHADOW_ALPHA  = 22      # bóng nhẹ trên nền sáng, tương đương rgba(0,0,0,.09)
 
 
 def rgba(hex_color: str, alpha: float) -> str:

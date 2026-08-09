@@ -155,16 +155,12 @@ class SegmentedControl(QWidget):
             btn.setObjectName("segment")
             btn.setCheckable(True)
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
-            radius = tokens.RADIUS_MD
-            extra = ""
+            # Đánh dấu vị trí bằng property thay vì inline style
+            # → theme.py sẽ style qua property selector, giữ nguyên :checked
             if i == 0:
-                extra = (f"border-top-left-radius: {radius}px;"
-                         f"border-bottom-left-radius: {radius}px;")
-            if i == last:
-                extra += (f"border-top-right-radius: {radius}px;"
-                          f"border-bottom-right-radius: {radius}px;")
-            if extra:
-                btn.setStyleSheet(f"QPushButton#segment {{ {extra} }}")
+                btn.setProperty("position", "first")
+            elif i == last:
+                btn.setProperty("position", "last")
             self._buttons.append(btn)
             self._group.addButton(btn, i)
             layout.addWidget(btn)

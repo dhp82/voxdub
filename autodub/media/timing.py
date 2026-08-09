@@ -169,13 +169,19 @@ def apply_soft_timing(
                 return
             dst = os.path.join(out_dir, os.path.basename(src))
             atempo = placements[i]["atempo"]
+            # Resume-safe: đầu ra còn mới hơn nguồn VÀ đúng thời lượng kỳ
+            # vọng (hệ số nén có thể đổi giữa hai lần chạy) thì bỏ qua.
+            if (os.path.exists(dst) and os.path.getsize(dst) > 0
+                    and os.path.getmtime(dst) >= os.path.getmtime(src)):
+                want = (durations[i] or 0.0) / atempo
+                have = wav_duration_s(dst) or -1.0
+                if abs(have - want) < 0.05:
+                    return
             if atempo > 1.0:
                 apply_atempo(src, dst, atempo)
             else:
                 # Copy thay vì link: dst_dir có thể bị xoá độc lập.
-                if (not os.path.exists(dst)
-                        or os.path.getmtime(dst) < os.path.getmtime(src)):
-                    shutil.copyfile(src, dst)
+                shutil.copyfile(src, dst)
 
         with ThreadPoolExecutor(max_workers=max_workers) as pool:
             list(pool.map(_one, range(len(segments))))

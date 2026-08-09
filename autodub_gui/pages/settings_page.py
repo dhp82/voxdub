@@ -1,9 +1,9 @@
-"""Trang Cài đặt: sáu thẻ dạng viên thuốc, ba nút ở chân trang.
+"""Trang Cài đặt: ba thẻ dạng viên thuốc, ba nút ở chân trang.
 
 Các ô nhập được dựng tự động từ bảng khai báo trong `settings_fields.py`, nên
 thêm một mục mới chỉ cần khai báo một dòng là nó tự có mặt, tự nạp giá trị và
-tự được lưu. Riêng thẻ Giọng đọc là thư viện giọng riêng, xem
-`pages/voice_library.py`.
+tự được lưu. Giọng đọc, Phụ đề và Dịch thuật đã tách ra thành trang Công cụ
+riêng trên thanh bên, xem `pages/tool_page_base.py`.
 """
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ import os
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
-    QCheckBox, QColorDialog, QDoubleSpinBox, QHBoxLayout, QLabel, QScrollArea,
+    QCheckBox, QColorDialog, QHBoxLayout, QLabel, QScrollArea,
     QStackedWidget, QVBoxLayout, QWidget,
 )
 
@@ -24,10 +24,7 @@ from autodub_gui.env_store import (
 )
 from autodub_gui.pages import BasePage
 from autodub_gui.pages import settings_fields as spec
-from autodub_gui.pages.settings_panels import (
-    ConnectionChecks, DiskUsagePanel, MaintenancePanel,
-)
-from autodub_gui.pages.voice_library import VoiceLibraryTab
+from autodub_gui.pages.settings_panels import DiskUsagePanel, MaintenancePanel
 from autodub_gui.ui.buttons import GhostButton, PrimaryButton
 from autodub_gui.ui.collapsible import CollapsibleSection
 from autodub_gui.ui.inputs import (
@@ -48,33 +45,22 @@ _UI_STATE_FILE = "settings_ui.json"
 # trước khi dùng. Các nhóm còn lại gập lại, bấm tiêu đề là mở.
 _EXPANDED_GROUPS: dict[str, set[str]] = {
     spec.TAB_BASIC: {"Chất lượng tổng thể", "Nghe và chép lời video gốc"},
-    spec.TAB_SUBTITLE: {"Mặc định"},
     spec.TAB_PERF: {"Hiệu năng"},
-    spec.TAB_API: {"Dịch tự động"},
     spec.TAB_ADVANCED: set(),
-}
-
-# Nơi dịch đang chọn → nhóm chứa API Key của nơi đó. Nhóm này được mở sẵn
-# vì đây là thứ người dùng BẮT BUỘC phải điền để dịch tự động chạy được.
-_ENGINE_GROUP: dict[str, str] = {
-    "gemini": "Google Gemini",
-    "openrouter": "OpenRouter",
-    "openai": "OpenAI",
-    "anthropic": "Anthropic",
-    "deepseek": "DeepSeek",
-    "custom": "Dịch vụ khác",
 }
 
 
 class SettingsPage(BasePage):
-    """Toàn bộ tùy chỉnh của ứng dụng."""
+    """Toàn bộ tùy chỉnh của ứng dụng (các thẻ Cơ bản, Hiệu suất, Nâng cao).
+
+    Giọng đọc, Phụ đề và Dịch thuật đã chuyển sang trang Công cụ riêng.
+    """
 
     saved = Signal()
 
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
         self._widgets: dict[str, QWidget] = {}
-        self._secret_fields: list[QWidget] = []
         self._sections: dict[tuple[str, str], CollapsibleSection] = {}
         self._snapshot: dict[str, str] = {}
         self._dirty = False
@@ -89,19 +75,15 @@ class SettingsPage(BasePage):
                                 _PAGE_MARGIN, tokens.SP_4)
         root.setSpacing(tokens.SP_3)
 
-        # Thanh tab viên thuốc + chồng trang, thay cho QTabWidget cũ.
         tab_icons = {
             spec.TAB_BASIC: icons.sliders,
-            spec.TAB_VOICE: icons.mic,
-            spec.TAB_SUBTITLE: icons.captions,
             spec.TAB_PERF: icons.star,
-            spec.TAB_API: icons.globe,
             spec.TAB_ADVANCED: icons.gear,
         }
         self.tabbar = PillTabBar()
         self._stack = QStackedWidget()
         clear_background(self._stack)
-        for name in spec.TABS:
+        for name in spec.SETTINGS_TABS:
             make_icon = tab_icons.get(name)
             self.tabbar.add_tab(
                 name, make_icon(tokens.TEXT_SECONDARY) if make_icon else None)
@@ -117,11 +99,6 @@ class SettingsPage(BasePage):
 
     def _build_tab(self, tab: str) -> QWidget:
         """Một thẻ: vùng cuộn chứa các nhóm mục."""
-        if tab == spec.TAB_VOICE:
-            # Thẻ Giọng đọc là thư viện giọng riêng, tự lo cuộn bên trong.
-            self.voice_panel = VoiceLibraryTab(self._current_settings)
-            self.voice_panel.changed.connect(self._mark_dirty)
-            return self.voice_panel
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setHorizontalScrollBarPolicy(
@@ -164,7 +141,6 @@ class SettingsPage(BasePage):
             spec.CHECK: self._build_check,
             spec.SLIDER: self._build_slider,
             spec.NUMBER: self._build_number,
-            spec.SECRET: self._build_secret,
             spec.MULTILINE: self._build_multiline,
             spec.FOLDER: self._build_folder,
             spec.FILE: self._build_file,
@@ -226,6 +202,8 @@ class SettingsPage(BasePage):
         return widget
 
     def _build_number(self, item: spec.Field) -> QWidget:
+        from PySide6.QtWidgets import QDoubleSpinBox
+
         spin = QDoubleSpinBox()
         spin.setRange(item.minimum, item.maximum)
         spin.setSingleStep(item.step)
@@ -237,13 +215,6 @@ class SettingsPage(BasePage):
     def _build_text(self, item: spec.Field) -> QWidget:
         widget = LabeledLineEdit(item.label, item.placeholder, item.hint)
         widget.changed.connect(self._mark_dirty)
-        return widget
-
-    def _build_secret(self, item: spec.Field) -> QWidget:
-        widget = LabeledLineEdit(item.label, item.placeholder, item.hint,
-                                 password=True)
-        widget.changed.connect(self._mark_dirty)
-        self._secret_fields.append(widget)
         return widget
 
     def _build_multiline(self, item: spec.Field) -> QWidget:
@@ -280,15 +251,6 @@ class SettingsPage(BasePage):
 
     def _extra_panels(self, tab: str) -> list[QWidget]:
         """Những phần không phải ô nhập đơn giản, dựng riêng cho từng thẻ."""
-        if tab == spec.TAB_API:
-            self.checks_panel = ConnectionChecks(self._current_values)
-            engine = self._widget_of("TRANSLATE_ENGINE")
-            if engine is not None:
-                engine.changed.connect(
-                    lambda: self.checks_panel.select_engine(
-                        engine.current_key()))
-                engine.changed.connect(self._sync_engine_group)
-            return [self.checks_panel]
         if tab == spec.TAB_ADVANCED:
             self.maintenance = MaintenancePanel(self._current_settings)
             self.disk_panel = DiskUsagePanel(self._current_settings)
@@ -298,10 +260,6 @@ class SettingsPage(BasePage):
     def _build_footer(self) -> QHBoxLayout:
         row = QHBoxLayout()
         row.setSpacing(tokens.SP_2)
-        self.chk_secrets = QCheckBox("Hiện API Key")
-        self.chk_secrets.setToolTip(
-            "Bật để nhìn thấy API Key đang lưu, dùng khi cần kiểm tra lại.")
-        self.chk_secrets.toggled.connect(self._toggle_secrets)
         self.btn_defaults = GhostButton("Khôi phục mặc định")
         self.btn_defaults.clicked.connect(self._restore_defaults)
         self.btn_cancel = GhostButton("Hủy")
@@ -309,7 +267,6 @@ class SettingsPage(BasePage):
         self.btn_cancel.clicked.connect(self._cancel_changes)
         self.btn_save = PrimaryButton("Lưu cài đặt")
         self.btn_save.clicked.connect(self.save)
-        row.addWidget(self.chk_secrets)
         row.addWidget(self.btn_defaults)
         row.addStretch()
         row.addWidget(self.btn_cancel)
@@ -359,39 +316,23 @@ class SettingsPage(BasePage):
             widget.set_text(raw)
 
     # -- Nạp, lưu, hủy -------------------------------------------------
+    def _own_fields(self) -> list[spec.Field]:
+        """Chỉ những mục thuộc ba thẻ trang này còn giữ.
+
+        Mục của Giọng đọc, Phụ đề và Dịch thuật giờ do trang Công cụ lo. Nếu
+        vẫn gom chúng ở đây thì `_get_value` trả về giá trị mặc định (vì
+        không còn ô nhập nào) và bấm Lưu sẽ xóa sạch cấu hình bên kia.
+        """
+        return [item for item in spec.FIELDS
+                if item.tab in spec.SETTINGS_TABS]
+
     def reload(self) -> None:
         """Đọc lại toàn bộ giá trị từ tệp cấu hình."""
-        from autodub.keystore import resolve
-
         env = read_env()
-        for item in spec.FIELDS:
-            raw = env.get(item.key, item.default)
-            if item.kind == spec.SECRET:
-                # API Key có thể đã được cất vào kho khóa hệ điều hành.
-                raw = resolve(item.key, raw)
-            self._set_value(item, raw)
-        if hasattr(self, "voice_panel"):
-            self.voice_panel.load(env)
-        if hasattr(self, "checks_panel"):
-            self.checks_panel.select_engine(env.get("TRANSLATE_ENGINE", ""))
-        self._sync_engine_group()
+        for item in self._own_fields():
+            self._set_value(item, env.get(item.key, item.default))
         self._snapshot = self._collect()
         self._set_dirty(False)
-
-    def _sync_engine_group(self) -> None:
-        """Mở sẵn nhóm API Key của nơi dịch đang chọn, gập các nhóm kia.
-
-        Người dùng đổi nơi dịch thì thứ họ cần điền tiếp theo là mã của nơi
-        đó — mở đúng nhóm ấy ra, còn mã của các nơi khác thì gập lại cho gọn.
-        """
-        engine = self._widget_of("TRANSLATE_ENGINE")
-        if engine is None:
-            return
-        wanted = _ENGINE_GROUP.get(engine.current_key())
-        for group in _ENGINE_GROUP.values():
-            section = self._sections.get((spec.TAB_API, group))
-            if section is not None:
-                section.set_expanded(group == wanted)
 
     # -- Nhớ thẻ đang mở ------------------------------------------------
     def _ui_state_path(self) -> str:
@@ -417,34 +358,14 @@ class SettingsPage(BasePage):
             pass               # không ghi được thì thôi, không đáng báo lỗi
 
     def _collect(self) -> dict[str, str]:
-        """Gom giá trị hiện tại của mọi mục."""
-        values = {item.key: self._get_value(item) for item in spec.FIELDS}
-        if hasattr(self, "voice_panel"):
-            values.update(self.voice_panel.values())
-        return values
-
-    def _current_values(self) -> dict[str, str]:
-        """Giá trị đang hiển thị, dùng cho các nút kiểm tra kết nối."""
-        return self._collect()
+        """Gom giá trị hiện tại của mọi mục trang này quản."""
+        return {item.key: self._get_value(item) for item in self._own_fields()}
 
     def _current_settings(self):
-        """Cấu hình phản ánh đúng form hiện tại, chưa cần bấm Lưu.
-
-        Nghe thử giọng phải dùng ĐÚNG giọng và phong cách đang chọn trên màn
-        hình, chứ không phải giá trị đã lưu lần trước.
-        """
-        from dataclasses import replace
-
+        """Cấu hình hiện tại, dùng cho bảng bảo trì và bảng dung lượng đĩa."""
         from autodub.config import Settings
 
-        values = self._collect()
-        settings = Settings.load(override=True)
-        changes: dict = {}
-        if values.get("VIENEU_VOICE"):
-            changes["vieneu_voice"] = values["VIENEU_VOICE"]
-        if values.get("VIENEU_STYLE"):
-            changes["vieneu_style"] = values["VIENEU_STYLE"]
-        return replace(settings, **changes) if changes else settings
+        return Settings.load(override=True)
 
     def save(self) -> None:
         """Ghi mọi thay đổi xuống tệp cấu hình."""
@@ -453,7 +374,6 @@ class SettingsPage(BasePage):
         for key in ("PARALLEL_WORKERS", "VIENEU_MAX_WORKERS"):
             if values.get(key, "").strip() in ("0", "0.0", ""):
                 values[key] = ""
-        values = self._stash_secrets(values)
         try:
             write_env(values)
         except OSError as e:
@@ -463,54 +383,9 @@ class SettingsPage(BasePage):
                 "một chương trình khác mở, hoặc thư mục không cho ghi. Hãy "
                 "đóng chương trình đó rồi bấm Lưu lại.", detail=str(e))
             return
-        self._warn_missing_key(values)
         self._snapshot = self._collect()
         self._set_dirty(False)
         self.saved.emit()
-
-    def _stash_secrets(self, values: dict[str, str]) -> dict[str, str]:
-        """Cất API Key vào kho khóa hệ điều hành nếu máy hỗ trợ.
-
-        Cất được thì tệp cấu hình chỉ còn dấu ``@keyring`` thay cho giá trị
-        thật — chụp màn hình hay gửi thư mục ứng dụng cho ai cũng không lộ.
-        Máy không có gói keyring thì giữ nguyên hành vi cũ: ghi thẳng .env.
-        """
-        from autodub.keystore import SENTINEL, available, delete_secret, \
-            set_secret
-
-        if not available():
-            return values
-        out = dict(values)
-        for item in spec.FIELDS:
-            if item.kind != spec.SECRET or item.key not in out:
-                continue
-            secret = out[item.key].strip()
-            if not secret:
-                delete_secret(item.key)     # xóa key là xóa cả trong kho khóa
-                continue
-            if set_secret(item.key, secret):
-                out[item.key] = SENTINEL
-        return out
-
-    def _warn_missing_key(self, values: dict[str, str]) -> None:
-        """Nhắc nhẹ khi chọn nơi dịch mà chưa điền API Key."""
-        from autodub.text.translate_openai import PROVIDERS
-
-        engine = values.get("TRANSLATE_ENGINE", "")
-        key_name = ("GOOGLE_API_KEY" if engine == "gemini"
-                    else f"{engine.upper()}_API_KEY")
-        if not engine or values.get(key_name, "").strip():
-            return
-        label = ("Gemini" if engine == "gemini"
-                 else PROVIDERS.get(engine, {}).get("label", engine))
-        where = ("aistudio.google.com/apikey" if engine == "gemini"
-                 else PROVIDERS.get(engine, {}).get("keys", ""))
-        ConfirmDialog.ask(
-            self, f"Chưa có API Key {label}",
-            f"Bạn chọn dịch bằng {label} nhưng chưa điền API Key. Cài đặt "
-            "vẫn được lưu, nhưng khi chạy tới bước dịch ứng dụng sẽ dừng lại "
-            f"và hướng dẫn bạn dịch tay. Lấy mã tại {where}.",
-            kind="warning", confirm_label="Đã hiểu", cancel_label="")
 
     def _cancel_changes(self) -> None:
         if not self._dirty:
@@ -522,25 +397,20 @@ class SettingsPage(BasePage):
             kind="warning", confirm_label="Bỏ thay đổi", cancel_label="Giữ lại")
         if not confirmed:
             return
-        for item in spec.FIELDS:
+        for item in self._own_fields():
             self._set_value(item, self._snapshot.get(item.key, item.default))
-        # Thẻ Giọng đọc không nằm trong spec.FIELDS — trả nó về ảnh chụp
-        # đã lưu, không thì giọng vừa bấm chọn vẫn dính lại sau khi Hủy.
-        if hasattr(self, "voice_panel"):
-            self.voice_panel.load(self._snapshot)
         self._set_dirty(False)
         TOASTS.info("Đã quay về giá trị đã lưu lần trước.")
 
     def _restore_defaults(self) -> None:
         confirmed, _ = ConfirmDialog.ask(
             self, "Khôi phục mặc định",
-            "Toàn bộ cài đặt sẽ quay về giá trị ban đầu của ứng dụng. Mã kết "
-            "nối bạn đã điền cũng bị xóa. Thay đổi chỉ được ghi xuống khi bạn "
-            "bấm Lưu cài đặt.",
+            "Toàn bộ cài đặt sẽ quay về giá trị ban đầu của ứng dụng. "
+            "Thay đổi chỉ được ghi xuống khi bạn bấm Lưu cài đặt.",
             kind="warning", confirm_label="Nạp giá trị mặc định")
         if not confirmed:
             return
-        for item in spec.FIELDS:
+        for item in self._own_fields():
             self._set_value(item, item.default)
         self._set_dirty(True)
         TOASTS.info("Đã nạp giá trị mặc định — bấm Lưu cài đặt để áp dụng.")
@@ -558,14 +428,6 @@ class SettingsPage(BasePage):
         return self._dirty
 
     # -- Tiện ích ------------------------------------------------------
-    def _toggle_secrets(self, shown: bool) -> None:
-        from PySide6.QtWidgets import QLineEdit
-
-        mode = (QLineEdit.EchoMode.Normal if shown
-                else QLineEdit.EchoMode.Password)
-        for widget in self._secret_fields:
-            widget.edit.setEchoMode(mode)
-
     def _pick_color(self, button) -> None:
         from PySide6.QtGui import QColor
 
@@ -609,19 +471,9 @@ class SettingsPage(BasePage):
             widget.edit.setFocus()
             widget.edit.selectAll()
 
-    def open_tool(self, key: str) -> None:
-        """Nhảy tới thẻ tương ứng với mục công cụ trên thanh bên."""
-        tab = {
-            "voice": spec.TAB_VOICE,
-            "translate": spec.TAB_API,
-            "subtitle": spec.TAB_SUBTITLE,
-        }.get(key)
-        if tab is not None:
-            self.tabbar.set_current_index(spec.TABS.index(tab))
-
     # -- Vòng đời ------------------------------------------------------
     def cleanup(self) -> None:
-        for name in ("voice_panel", "checks_panel", "disk_panel"):
+        for name in ("disk_panel",):
             panel = getattr(self, name, None)
             if panel is not None and hasattr(panel, "cleanup"):
                 panel.cleanup()

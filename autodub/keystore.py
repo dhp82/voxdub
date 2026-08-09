@@ -1,12 +1,12 @@
-"""Cất API Key vào kho khóa của hệ điều hành (Windows Credential Manager).
+"""Cất bí mật vào kho khóa của hệ điều hành (Windows Credential Manager).
 
-Tệp ``.env`` là chữ thường, ai mở cũng đọc được — API Key nằm trong đó dễ lộ
-khi người dùng chụp màn hình, sao lưu hay gửi thư mục ứng dụng cho người
-khác. Khi máy có gói ``keyring``, ứng dụng cất giá trị thật vào kho khóa của
-hệ điều hành và chỉ ghi dấu ``@keyring`` vào ``.env``.
+Người dùng duy nhất hiện nay là ``saas_client``: token thiết bị không được
+nằm trong ``.env`` (tệp chữ thường, ai chụp màn hình hay sao lưu thư mục ứng
+dụng cũng đọc được).
 
 Gói ``keyring`` là TÙY CHỌN: không có thì mọi hàm ở đây nói "không dùng
-được" và API Key tiếp tục nằm trong ``.env`` như trước — không đổi hành vi.
+được" và token chỉ sống trong phiên chạy — mỗi lần mở app đăng ký lại thiết
+bị, ví Vox vẫn nguyên vì nó gắn với mã máy chứ không gắn với token.
 """
 from __future__ import annotations
 
@@ -17,7 +17,7 @@ logger = logging.getLogger("autodub.keystore")
 #: Tên dịch vụ trong kho khóa của hệ điều hành.
 _SERVICE = "VoxDub Studio"
 
-#: Giá trị ghi vào .env thay cho API Key thật khi đã cất vào kho khóa.
+#: Giá trị ghi vào .env thay cho bí mật thật khi đã cất vào kho khóa.
 SENTINEL = "@keyring"
 
 
@@ -80,7 +80,7 @@ def resolve(key: str, raw: str) -> str:
 
     Giá trị thường thì trả nguyên; gặp dấu ``@keyring`` thì tra kho khóa.
     Dấu còn đó mà kho khóa không mở được (gỡ gói keyring, đổi máy) thì đành
-    trả trống — nơi gọi sẽ báo thiếu API Key như bình thường.
+    trả trống — nơi gọi xử lý như chưa có giá trị.
     """
     raw = (raw or "").strip()
     if raw != SENTINEL:

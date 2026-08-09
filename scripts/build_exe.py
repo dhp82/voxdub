@@ -6,8 +6,8 @@ Chạy từ project root với Python chính (đã cài đủ requirements + pyi
     py scripts/build_exe.py --no-test  # chỉ build
 
 Các bước:
-  1. Đọc REMOTE_CONTROL_URL từ .env của máy build → sinh
-     autodub_gui/_embedded.py (kill-switch nhúng TRONG exe, không lộ ra
+  1. Đọc VOXDUB_API_URL từ .env của máy build → sinh
+     autodub_gui/_embedded.py (địa chỉ máy chủ nhúng TRONG exe, không lộ ra
      file .env của người dùng). Khôi phục file rỗng sau khi build.
   2. PyInstaller onedir theo autodub.spec → build/, dist/VoxDub/
   3. Lắp ráp thư mục phân phối dist/VoxDub/:
@@ -38,13 +38,14 @@ DIST_DIR = os.path.join(PROJECT_ROOT, "dist", "VoxDub")
 EMBEDDED_TEMPLATE = '''"""Giá trị nhúng cứng vào bản đóng gói (exe).
 
 File này trong repo LUÔN rỗng. Khi build exe, ``scripts/build_exe.py`` sinh
-lại nó với REMOTE_CONTROL_URL đọc từ .env của máy build, rồi khôi phục về
-rỗng sau khi build xong — URL kill-switch nằm TRONG exe, không lộ ra .env
-của người dùng và người dùng không chỉnh được.
+lại nó với VOXDUB_API_URL đọc từ .env của máy build, rồi khôi phục về rỗng
+sau khi build xong — địa chỉ máy chủ nằm TRONG exe, không lộ ra .env của
+người dùng và người dùng không chỉnh được.
 """
 
-# Rỗng = không nhúng; remote_gate rơi về biến môi trường (chế độ dev).
-REMOTE_CONTROL_URL = {url!r}
+# Rỗng = không nhúng; saas_client rơi về địa chỉ cố định trong mã, rồi tới
+# biến môi trường VOXDUB_API_URL (chỉ khi chạy từ mã nguồn).
+VOXDUB_API_URL = {url!r}
 '''
 
 
@@ -87,13 +88,13 @@ def write_embedded(url: str) -> None:
         f.write(EMBEDDED_TEMPLATE.format(url=url))
 
 
-def step_embed_killswitch() -> str:
-    url = read_env_value("REMOTE_CONTROL_URL")
+def step_embed_api_url() -> str:
+    url = read_env_value("VOXDUB_API_URL")
     if url:
-        log(f"nhúng REMOTE_CONTROL_URL vào exe: {url}")
+        log(f"nhúng VOXDUB_API_URL vào exe: {url}")
     else:
-        log("(.env không có REMOTE_CONTROL_URL — exe dùng URL cố định "
-            "trong remote_gate.py)")
+        log("(.env không có VOXDUB_API_URL — exe dùng địa chỉ cố định "
+            "trong autodub/saas_client.py)")
     write_embedded(url)
     return url
 
@@ -124,7 +125,7 @@ def step_assemble() -> None:
     scripts_dst = os.path.join(DIST_DIR, "scripts")
     os.makedirs(scripts_dst, exist_ok=True)
     for script in ("setup_vieneu.py", "setup_paraformer.py",
-                   "setup_douyin.py"):
+                   "setup_whisper.py", "setup_douyin.py"):
         shutil.copy2(os.path.join(PROJECT_ROOT, "scripts", script),
                      scripts_dst)
 
@@ -137,13 +138,14 @@ def step_assemble() -> None:
     # .bat để người dùng đúp chuột là cài — không cần biết dòng lệnh.
     for name, content in (
             ("Cai dat giong VieNeu.bat", SETUP_VIENEU_BAT),
+            ("Cai dat Whisper ASR.bat", SETUP_WHISPER_BAT),
             ("Cai dat ASR tieng Trung (Paraformer).bat", SETUP_PARAFORMER_BAT),
             ("Cai dat tinh nang Douyin.bat", SETUP_DOUYIN_BAT)):
         with open(os.path.join(DIST_DIR, name), "w", encoding="utf-8") as f:
             f.write(content)
 
-    # .env.example làm mẫu; TUYỆT ĐỐI không copy .env thật (chứa key +
-    # kill-switch URL — URL đã nhúng trong exe).
+    # .env.example làm mẫu; TUYỆT ĐỐI không copy .env thật của máy build
+    # (địa chỉ máy chủ đã nhúng trong exe).
     src_example = os.path.join(PROJECT_ROOT, ".env.example")
     if os.path.isfile(src_example):
         shutil.copy2(src_example, os.path.join(DIST_DIR, ".env.example"))
@@ -156,30 +158,10 @@ def step_assemble() -> None:
     # Thư mục models rỗng — đích đến của các script cài model.
     os.makedirs(os.path.join(DIST_DIR, "models"), exist_ok=True)
 
-    # Giọng VieNeu đóng kèm bản phát hành: chỉ giữ preset chính thức
-    # (source == "library" — nạp từ thư mục voices/ của dự án). Giọng người
-    # dùng tự enroll trên máy build (source == "custom", ví dụ giọng thử
-    # nghiệm) bị loại TỰ ĐỘNG ở đây — máy người dùng phải sạch, ai muốn
-    # giọng riêng thì tự enroll trên máy họ.
-    custom_voices = os.path.join(PROJECT_ROOT, "models", "vieneu",
-                                 "custom_voices.json")
-    if os.path.isfile(custom_voices):
-        with open(custom_voices, encoding="utf-8") as f:
-            data = json.load(f)
-        presets = data.get("presets", {})
-        official = {name: preset for name, preset in presets.items()
-                    if preset.get("source") == "library"}
-        dropped = len(presets) - len(official)
-        if official:
-            dst = os.path.join(DIST_DIR, "models", "vieneu")
-            os.makedirs(dst, exist_ok=True)
-            with open(os.path.join(dst, "custom_voices.json"), "w",
-                      encoding="utf-8") as f:
-                json.dump({**data, "presets": official}, f,
-                          ensure_ascii=False, indent=2)
-        log(f"đã kèm {len(official)} giọng chính thức"
-            + (f", loại {dropped} giọng tự thêm khỏi bản đóng gói"
-               if dropped else ""))
+    # Giọng VieNeu: KHÔNG đóng gói voices/ hay custom_voices.json nữa.
+    # App tự tải voices.zip từ GitHub release lần đầu chạy (voice_downloader).
+    # Lý do: giảm kích thước exe ~60-100 MB, dễ update voices riêng biệt.
+    log("voices/ và custom_voices.json KHÔNG đóng gói — app tự tải lần đầu")
 
     # Font kèm app: copy nguyên fonts/ (file .ttf/.otf + license + README).
     # Nằm CẠNH exe (không trong _internal) để người dùng tự thả thêm font
@@ -269,6 +251,25 @@ echo.
 pause
 """
 
+SETUP_WHISPER_BAT = r"""@echo off
+chcp 65001 >nul
+title Cai dat Whisper ASR cho VoxDub Studio
+echo.
+echo  Script nay cai faster-whisper vao venv rieng (.venv-whisper).
+echo  Whisper se chay ngoai exe — giam ~112 MB kich thuoc ban phan phoi.
+echo  Yeu cau: da cai Python 3.10-3.12 (xem HUONG_DAN_CAI_DAT.md, Buoc 2).
+echo.
+cd /d "%~dp0"
+py -3.12 scripts\setup_whisper.py 2>nul || py -3.11 scripts\setup_whisper.py 2>nul || py -3.10 scripts\setup_whisper.py 2>nul || py scripts\setup_whisper.py || python scripts\setup_whisper.py
+if errorlevel 1 (
+    echo.
+    echo  !! Cai dat that bai. Kiem tra da cai Python chua: py --version
+    echo     Xem muc "Xu ly loi" trong HUONG_DAN_CAI_DAT.md
+)
+echo.
+pause
+"""
+
 SETUP_PARAFORMER_BAT = r"""@echo off
 chcp 65001 >nul
 title Cai dat ASR tieng Trung (Paraformer) cho VoxDub Studio
@@ -313,12 +314,13 @@ GUIDE_MD = """# Hướng dẫn cài đặt VoxDub Studio
 VoxDub Studio lồng tiếng video tự động sang tiếng Việt: tải video → nhận dạng
 giọng nói → dịch → đọc giọng Việt (clone giọng) → ghép lại thành video.
 
-Mọi thứ chạy **trên máy của bạn, miễn phí** — nhưng vì thế bạn cần cài
-một vài công cụ trước khi dùng. Làm đúng thứ tự dưới đây, mỗi bước chỉ
-làm **một lần duy nhất**.
+Nhận dạng giọng nói, đọc giọng Việt và ghép video đều chạy **trên máy của
+bạn**; riêng bước dịch chạy qua máy chủ VoxDub và tính bằng **Vox**. Bạn cần
+cài vài công cụ trước khi dùng — làm đúng thứ tự dưới đây, mỗi bước chỉ làm
+**một lần duy nhất**.
 
 > **Cài tối thiểu để chạy được ngay:** Bước 1 (FFmpeg) + Bước 3 (giọng đọc
-> VieNeu) + Bước 4 (điền API key dịch trong tab Cài đặt).
+> VieNeu). Máy mới được tặng sẵn Vox dùng thử, không cần mua gì để thử.
 
 > **Máy cần có:** Windows 10/11 64-bit, card đồ họa NVIDIA (khuyến nghị,
 > để chạy nhanh), ~10 GB dung lượng trống, kết nối mạng để tải model.
@@ -361,22 +363,34 @@ Script tự tạo môi trường riêng (`.venv-vieneu`), tải model (~300 MB) 
 chạy thử. Chỉ mất vài phút, **không cần card đồ họa** — đây là bộ giọng
 đọc của app với hàng chục giọng nam/nữ.
 
-## Bước 4 — Điền API key dịch tự động (miễn phí, 2 phút)
+## Bước 4 — Vox (tài nguyên dịch)
 
-1. Lấy key **miễn phí** ở một trong hai nơi:
-   - **OpenRouter** (khuyến nghị): <https://openrouter.ai/keys>
-   - **Google Gemini**: <https://aistudio.google.com/apikey>
-2. Mở **VoxDub.exe → Tab Cài đặt → thẻ Kết nối**, chọn nơi dịch, dán key, bấm **Lưu cài đặt**.
+Bước dịch chạy qua máy chủ VoxDub nên bạn **không phải đăng ký tài khoản
+hay lấy API key của ai cả**. Máy này đã được tặng sẵn Vox dùng thử — mở app
+là dịch được ngay.
 
-App cũng hỗ trợ OpenAI / Anthropic / DeepSeek / máy chủ tự chọn — cùng chỗ trong thẻ Kết nối.
+Hết Vox thì mua thêm:
+
+1. Vào trang web VoxDub, chọn gói (hoặc tự nhập số tiền bạn muốn).
+2. Chuyển khoản theo mã QR hiện trên màn hình. **Giữ nguyên nội dung chuyển
+   khoản** — đó là mã đơn hàng, ghi sai thì hệ thống không khớp được.
+3. Vài giây sau bạn nhận **mã kích hoạt** dạng `VOX-XXXX-XXXX-XXXX` (hiện
+   trên web và gửi vào email nếu bạn có điền).
+4. Mở **VoxDub.exe → Tài khoản**, dán mã, bấm **Kích hoạt**.
+
+> Mỗi mã chỉ kích hoạt được **một lần trên một máy**. Vox gắn với chiếc máy
+> này chứ không gắn với tài khoản, nên cài lại app hay xóa cấu hình đều
+> không mất Vox. Đổi máy thì liên hệ hỗ trợ kèm mã máy (xem ở trang Tài
+> khoản) để được chuyển sang.
 
 ## Bước 5 — Mở VoxDub Studio và kiểm tra
 
 1. Đúp chuột **VoxDub.exe**.
-2. Vào tab **Cài đặt**:
-   - Thẻ **Kết nối**: xác nhận nơi dịch và API key (đã điền ở Bước 4).
-   - Thẻ **Giọng đọc**: chọn giọng bạn thích, bấm **Nghe thử**.
-   - Bấm **Lưu cài đặt**.
+2. Kiểm tra nhanh:
+   - Trang **Tài khoản**: xem số Vox còn lại.
+   - Trang **Giọng đọc AI**: chọn giọng bạn thích, bấm **Nghe thử**.
+   - Trang **Dịch thuật**: điền ngữ cảnh video nếu muốn bản dịch bám đúng
+     chủ đề và xưng hô của kênh bạn (không bắt buộc).
 3. Về tab **Lồng tiếng**, dán link video YouTube, bấm chạy. Lần chạy đầu
    app tự tải model nhận dạng giọng nói (~1.5 GB, một lần duy nhất).
 
@@ -391,15 +405,14 @@ Video kết quả nằm trong thư mục `output` cạnh VoxDub.exe.
   **`Cai dat ASR tieng Trung (Paraformer).bat`** (~520 MB, chạy CPU). Video
   tiếng Trung sẽ được nghe-chép bằng Paraformer thay vì Whisper — chính xác
   hơn rõ rệt; ngôn ngữ khác tự dùng Whisper như cũ.
-- **Metadata YouTube + thumbnail:** cần Google API key (miễn phí tại
-  <https://aistudio.google.com/apikey>) — dán vào ô tương ứng trong tab
-  Cài đặt.
+- **Tiêu đề, mô tả và hashtag tự động:** bật/tắt ở trang **Dịch thuật**,
+  mục "Nội dung đăng bài". Tốn thêm một khoản Vox nhỏ mỗi video.
 - **Giọng đọc riêng:** thu một file WAV 5–10 giây giọng bạn muốn clone
   (rõ, không nhạc nền) + file `.txt` cùng tên chứa đúng nội dung câu nói,
   rồi chọn nó trong tab Cài đặt.
-- **Dịch đúng ngữ cảnh hơn:** vào tab Cài đặt, mục **"Ngữ cảnh video"** —
-  điền chủ đề, xưng hô và thuật ngữ cố định; bản dịch sẽ bám đúng văn phong
-  kênh của bạn.
+- **Dịch đúng ngữ cảnh hơn:** vào trang **Dịch thuật**, mục **"Ngữ cảnh
+  video"** — điền chủ đề, xưng hô và thuật ngữ cố định; bản dịch sẽ bám đúng
+  văn phong kênh của bạn.
 
 ---
 
@@ -409,7 +422,9 @@ Video kết quả nằm trong thư mục `output` cạnh VoxDub.exe.
 |---|---|
 | `ffmpeg` không nhận sau khi cài | Đóng mở lại PowerShell/app; hoặc chép `ffmpeg.exe`+`ffprobe.exe` vào cạnh `VoxDub.exe` |
 | `py` không nhận | Cài lại Python bằng winget (Bước 2), nhớ mở PowerShell mới |
-| API key dịch báo lỗi | Kiểm tra key còn hạn và đúng nơi dịch đã chọn trong thẻ Kết nối |
+| App báo hết Vox | Mở trang Tài khoản để nạp thêm, rồi chạy tiếp dự án đang dở — phần đã dịch xong không bị tính tiền lại |
+| Mã kích hoạt báo "đã dùng trên máy khác" | Mỗi mã chỉ dùng cho một máy. Nếu bạn chưa từng dùng mã này, liên hệ hỗ trợ kèm mã đơn hàng |
+| App báo không kết nối được máy chủ | Kiểm tra mạng. Các bước chạy trên máy (nghe chép, giọng đọc, xuất video) vẫn dùng bình thường |
 | App báo chưa cài bộ giọng VieNeu | Chạy `Cai dat giong VieNeu.bat` (Bước 3) |
 | Chạy chậm, GPU không dùng | Cần card NVIDIA + driver mới (`nvidia-smi` trong PowerShell phải chạy được) |
 | Antivirus chặn VoxDub.exe | Thêm thư mục VoxDub Studio vào danh sách loại trừ — app không có mã độc, exe đóng gói bằng PyInstaller hay bị nhận nhầm |
@@ -446,7 +461,7 @@ def main() -> int:
 
     _force_utf8_stdio()
     start = time.time()
-    step_embed_killswitch()
+    step_embed_api_url()
     try:
         step_pyinstaller()
     finally:

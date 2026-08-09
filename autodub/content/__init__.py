@@ -1,1 +1,1 @@
-"""Content generation: YouTube metadata + thumbnail prompts (Gemini)."""
+"""Sinh nội dung đăng bài cho YouTube/TikTok/Facebook (qua máy chủ VoxDub)."""

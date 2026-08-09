@@ -2,7 +2,7 @@
 """PyInstaller spec — VoxDub Studio GUI (onedir, windowed).
 
 Không chạy trực tiếp: dùng  py scripts/build_exe.py  (script đó sinh
-autodub_gui/_embedded.py với kill-switch URL rồi mới gọi PyInstaller).
+autodub_gui/_embedded.py với địa chỉ máy chủ rồi mới gọi PyInstaller).
 
 Nguyên tắc:
 - onedir (KHÔNG onefile): PySide6 + ctranslate2 giải nén mỗi lần chạy sẽ
@@ -28,6 +28,10 @@ datas = [
      os.path.join("autodub", "speech")),
     (os.path.join(ROOT, "autodub", "media", "demucs_worker.py"),
      os.path.join("autodub", "media")),
+    # Danh mục giọng CapCut — tài nguyên trong gói, đọc qua bundled_file.
+    (os.path.join(ROOT, "autodub", "speech", "tts", "capcut_api",
+                  "Voice.json"),
+     os.path.join("autodub", "speech", "tts", "capcut_api")),
     # Icon cửa sổ/taskbar (app.py nạp qua bundled_file).
     (os.path.join(ROOT, "logo.ico"), "."),
 ]
@@ -37,14 +41,19 @@ hiddenimports = [
     # PyInstaller đổi cách phân tích bytecode.
     "autodub.content.generator",       # pipeline.py step 8
     "autodub.text.ass_karaoke",        # pipeline/editor: phụ đề cụm chữ
-    "autodub.text.translate_analysis", # pipeline: dịch 2 lượt (lượt 0)
+    "autodub.text.translate_saas",     # pipeline: dịch qua máy chủ VoxDub
     "autodub.text.translate_review",   # pipeline: soát bản dịch
-    "autodub.text.translate_openai",   # pipeline: các nơi dịch chuẩn OpenAI
-    "autodub.text.translate_gemini",   # pipeline: dịch bằng Gemini
     "autodub.text.subtitles",          # pipeline/editor: làm mới phụ đề
+    "autodub.saas_client",             # mọi lượt gọi máy chủ
+    "autodub.device_id",               # mã máy gắn với ví Vox
     "autodub.speech.tts.voice_library",  # Cài đặt: nạp thư viện giọng mẫu
+    "autodub.speech.tts.voice_downloader",  # tải + enroll giọng lần đầu chạy
+    "autodub.speech.tts.capcut_vi",    # engine giọng CapCut (gọi API)
     "autodub.speech.align",            # ass_karaoke: khớp mốc chữ
     "autodub.media.timing",            # pipeline/editor: timeline mềm
+    "autodub.securestore",             # mã hóa file trung gian (hold Vox)
+    "cryptography.hazmat.primitives.ciphers.aead",  # AESGCM của securestore
+    "_cffi_backend",                   # cryptography cần lúc chạy
     "autodub_gui.fonts",               # style_dialog: font kèm app
     # Phần đa phương tiện của Qt — Trình chỉnh sửa phát video bằng nó.
     "PySide6.QtMultimedia",
@@ -61,10 +70,11 @@ except Exception as e:  # noqa: BLE001 — không được làm vỡ quá trình
     print(f"[spec] bo qua collect_submodules('autodub_gui'): {e}")
 
 # yt-dlp nạp extractor động theo tên; faster-whisper/ctranslate2 có DLL
-# native; google.genai cho dịch bằng Gemini và phần nội dung đăng bài.
+# native. Không còn SDK mô hình nào ở phía máy khách — mọi lượt gọi AI đi
+# qua HTTP tới máy chủ VoxDub (requests đã có sẵn).
 # playwright/PIL KHÔNG đóng gói: Douyin cài qua 'Cai dat tinh nang
-# Douyin.bat' (libs/ sideload), ảnh bìa thì ghi bytes thẳng ra tệp.
-for pkg in ("yt_dlp", "faster_whisper", "ctranslate2", "google.genai"):
+# Douyin.bat' (libs/ sideload).
+for pkg in ("yt_dlp", "faster_whisper", "ctranslate2"):
     try:
         d, b, h = collect_all(pkg)
     except Exception as e:  # package tùy chọn chưa cài → bỏ qua, không vỡ build
@@ -89,6 +99,17 @@ a = Analysis(
         # Rác kéo theo từ dependency phụ — app không đụng tới. ~95 MB.
         # (onnxruntime GIỮ LẠI — faster-whisper cần nó cho vad_filter.)
         "pandas", "pyarrow", "datasets", "aiohttp",
+        # av/PyAV — không có import trực tiếp; bị kéo vào ngầm qua dep
+        # transitiv. Cắt được ~65 MB.
+        "av",
+        # faster-whisper + ctranslate2 + onnxruntime + tokenizers + hf_xet
+        # chạy trong .venv-whisper qua asr_whisper_worker.py — không cần
+        # bundle trong exe, cắt được ~112 MB.
+        "faster_whisper", "ctranslate2", "tokenizers", "hf_xet",
+        # onnxruntime: VieNeu chạy trong .venv-vieneu; Paraformer trong
+        # .venv-asr; Whisper trong .venv-whisper. Không có path nào cần ort
+        # trong process chính của exe.
+        "onnxruntime",
         # Không dùng trong GUI.
         "tkinter", "matplotlib", "IPython", "jupyter", "pytest",
         # Chuyển sang user-install (libs/ sideload qua Cai dat tinh nang
@@ -114,10 +135,27 @@ _QT_PRUNE = ("Qt6Quick", "Qt6Qml", "Qt6QmlModels", "Qt6QmlMeta",
              "Qt6Labs", "opengl32sw", "qtvirtualkeyboardplugin",
              "Qt6ShaderTools", "Qt6SpatialAudio")
 
+# av/PyAV không dùng trực tiếp — prune ở cả Python và binary layer.
+_AV_PRUNE = ("av.libs", "avcodec", "avformat", "avutil", "avfilter",
+             "avdevice", "swscale", "swresample", "libx265", "libvpx",
+             "SvtAv1Enc", "libstdc++")
+
+# faster-whisper / ctranslate2 / onnxruntime chạy trong .venv-whisper —
+# prune binary residue dù đã exclude ở Python level.
+_ML_PRUNE = ("ctranslate2", "onnxruntime", "tokenizers", "hf_xet",
+             "faster_whisper")
+
 
 def _keep_binary(entry):
     base = os.path.basename(entry[0]).lower()
-    return not any(p.lower() in base for p in _QT_PRUNE)
+    dest = (entry[1] or "").lower()
+    if any(p.lower() in base for p in _QT_PRUNE):
+        return False
+    if any(p.lower() in base or p.lower() in dest for p in _AV_PRUNE):
+        return False
+    if any(p.lower() in base or p.lower() in dest for p in _ML_PRUNE):
+        return False
+    return True
 
 
 a.binaries = [b for b in a.binaries if _keep_binary(b)]
@@ -149,4 +187,5 @@ coll = COLLECT(
     strip=False,
     upx=False,
     name="VoxDub",
+    contents_directory="data",   # _internal → data: gọn hơn, dễ đọc hơn
 )

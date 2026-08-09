@@ -31,9 +31,14 @@ def write_custom(settings, presets: dict) -> None:
 # ------------------------------------------------------------- danh mục --- #
 
 def test_builtin_voices_are_always_available(settings):
+    # Không còn builtin — catalog rỗng khi chưa có custom_voices.json
+    assert voices.BUILTIN == ()
+    # Khi có custom voices thì catalog hoạt động bình thường
+    write_custom(settings, {
+        voices.DEFAULT_VOICE: {"gender": "male", "source": "library"},
+    })
     names = {v.name for v in voices.catalog(settings)}
     assert voices.DEFAULT_VOICE in names
-    assert len(names) >= len(voices.BUILTIN)
 
 
 def test_custom_voices_come_first_and_win_on_name_clash(settings):
@@ -61,6 +66,53 @@ def test_source_decides_the_custom_badge(settings):
     assert "Giọng bạn thêm" not in by_name["Từ thư viện"].label
 
 
+def test_capcut_catalog_is_available_without_any_local_install(settings):
+    """22 giọng CapCut đọc từ Voice.json trong gói — không cần VieNeu, không mạng."""
+    cap = [v for v in voices.catalog(settings) if v.is_capcut]
+    assert len(cap) == 22
+    assert {v.gender for v in cap} == {"male", "female"}
+    for voice in cap:
+        assert voice.custom is False
+        assert "CapCut" in voice.label
+        assert voices.source_group(voice) == "capcut"
+        assert voices.is_capcut_voice(voice.name) is True
+
+
+def test_offline_voices_are_never_mistaken_for_capcut(settings):
+    write_custom(settings, {
+        "Thư viện": {"gender": "male", "source": "library"},
+        "Riêng": {"gender": "male"},
+    })
+    by_name = {v.name: v for v in voices.catalog(settings)}
+    for name in ("Thư viện", "Riêng"):
+        assert by_name[name].is_capcut is False
+        assert "CapCut" not in by_name[name].label
+        assert voices.source_group(by_name[name]) == "offline"
+        assert voices.is_capcut_voice(name) is False
+
+
+def test_stale_cloned_capcut_presets_do_not_shadow_the_api_voices(settings):
+    """Máy cũ còn 16 giọng clone source="capcut" trùng tên với giọng API.
+
+    Preset cũ phải bị bỏ hẳn, nếu không nó đứng trước và chắn mất giọng API
+    — người dùng bấm "Thanh Lan" sẽ chạy VieNeu chứ không phải CapCut.
+    """
+    write_custom(settings, {"Thanh Lan": {"gender": "female",
+                                          "source": "capcut"}})
+    matches = [v for v in voices.catalog(settings) if v.name == "Thanh Lan"]
+    assert len(matches) == 1
+    assert matches[0].description  # mục từ Voice.json, không phải preset cũ
+
+
+def test_query_capcut_finds_capcut_voices(settings):
+    """Gõ "capcut" vào ô tìm kiếm phải ra đúng bộ giọng CapCut (khớp label)."""
+    write_custom(settings, {"Hoàng Nam": {"gender": "male",
+                                          "source": "library"}})
+    names = {v.name for v in _matching(settings, query="capcut")}
+    assert "Hoàng Nam" not in names
+    assert names == {v.name for v in voices.catalog(settings) if v.is_capcut}
+
+
 # ---------------------------------------------------------------- lọc ---- #
 
 def _matching(settings, **filters):
@@ -69,6 +121,11 @@ def _matching(settings, **filters):
 
 
 def test_filters_narrow_the_list(settings):
+    write_custom(settings, {
+        "Hoàng Nam": {"gender": "male", "region": "bac", "source": "library"},
+        "Mai Anh": {"gender": "female", "region": "bac", "source": "library"},
+        "Gia Bảo": {"gender": "male", "region": "nam", "source": "library"},
+    })
     male_north = _matching(settings, gender="male", region="bac")
     assert male_north
     for voice in male_north:
@@ -86,6 +143,10 @@ def test_country_filter(settings):
 
 
 def test_query_matches_the_visible_label(settings):
+    write_custom(settings, {
+        "Trúc Ly": {"gender": "female", "source": "library"},
+        "Hoàng Nam": {"gender": "male", "source": "library"},
+    })
     names = [v.name for v in _matching(settings, query="trúc")]
     assert "Trúc Ly" in names
 
@@ -93,10 +154,18 @@ def test_query_matches_the_visible_label(settings):
 # ------------------------------------------------------------- resolve --- #
 
 def test_resolve_prefers_the_requested_name(settings):
+    write_custom(settings, {
+        "Mai Anh": {"gender": "female", "source": "library"},
+        voices.DEFAULT_VOICE: {"gender": "male", "source": "library"},
+    })
     assert voices.resolve(settings, "Mai Anh") == "Mai Anh"
 
 
 def test_resolve_falls_back_to_the_configured_default(settings):
+    write_custom(settings, {
+        "Ngọc Linh": {"gender": "female", "source": "library"},
+        voices.DEFAULT_VOICE: {"gender": "male", "source": "library"},
+    })
     s = Settings(vieneu_model_dir=settings.vieneu_model_dir,
                  vieneu_voice="Ngọc Linh")
     assert voices.resolve(s, None) == "Ngọc Linh"
@@ -104,23 +173,38 @@ def test_resolve_falls_back_to_the_configured_default(settings):
 
 def test_resolve_never_returns_an_unknown_name(settings):
     """Tên lạ phải rơi về một giọng CÓ THẬT, không được trả lại nguyên trạng."""
+    write_custom(settings, {
+        voices.DEFAULT_VOICE: {"gender": "male", "source": "library"},
+    })
     picked = voices.resolve(settings, "Không Hề Tồn Tại")
     assert picked in {v.name for v in voices.catalog(settings)}
 
 
 def test_resolve_ignores_an_unknown_configured_default(settings):
+    write_custom(settings, {
+        voices.DEFAULT_VOICE: {"gender": "male", "source": "library"},
+    })
     s = Settings(vieneu_model_dir=settings.vieneu_model_dir,
                  vieneu_voice="Giọng Ma")
     assert voices.resolve(s, None) == voices.DEFAULT_VOICE
 
 
 def test_broken_custom_file_does_not_break_the_catalog(settings):
+    """File hỏng không được làm sập catalog — chỉ mất phần giọng offline."""
     import os
     path = settings.vieneu_custom_voices_path()
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
         f.write("{ hỏng")
-    assert voices.catalog(settings)      # vẫn còn giọng có sẵn
+    catalog = voices.catalog(settings)   # không ném lỗi
+    assert all(v.is_capcut for v in catalog)
+
+
+def test_resolve_falls_back_to_capcut_when_nothing_offline_is_installed(
+        settings):
+    """Máy chưa cài VieNeu vẫn phải chọn được một giọng có thật (CapCut)."""
+    picked = voices.resolve(settings, None)
+    assert voices.is_capcut_voice(picked)
 
 
 # ------------------------------------------------------------ thư viện --- #

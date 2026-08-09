@@ -60,9 +60,10 @@ def test_check_disk_missing_dir_walks_to_parent(tmp_path):
 
 
 def test_check_vieneu_not_configured(settings, monkeypatch):
+    """Chưa cài VieNeu chỉ là cảnh báo — giọng CapCut vẫn lồng tiếng được."""
     monkeypatch.setattr(Settings, "vieneu_configured", lambda self: False)
     result = _check_vieneu(settings)
-    assert result.level == "fail"
+    assert result.level == "warn"
     assert "setup_vieneu" in result.advice
 
 

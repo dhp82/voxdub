@@ -4,6 +4,8 @@ numpy>=1.24,<3.0
 audioop-lts>=0.2.2; python_version >= "3.13"
 python-dotenv>=1.0.1,<2.0
 requests>=2.31.0,<3.0
+# Mã hóa file trung gian khi hold Vox chưa chốt (autodub/securestore.py)
+cryptography>=42.0.0
 
 # --- ASR (local Whisper — free, offline) ---
 faster-whisper>=1.0.0,<2.0
@@ -23,12 +25,10 @@ soundfile>=0.13.0,<0.14
 # --- GUI ---
 PySide6>=6.6.0
 
-# --- Optional: YouTube metadata + thumbnails (GOOGLE_API_KEY) ---
-google-genai>=1.0.0
-
-# --- Optional: API Key storage in OS keyring ---
-# Cất API Key vào Windows Credential Manager thay vì để thẳng trong .env.
-# Cài một lần: pip install keyring  (không bắt buộc — không có thì .env như cũ)
+# --- Optional: device token storage in OS keyring ---
+# Cất token thiết bị vào Windows Credential Manager. Không có gói này thì
+# token chỉ sống trong phiên chạy — mỗi lần mở app đăng ký lại, vẫn đúng.
+# Cài một lần: pip install keyring
 # keyring>=24.0.0
 
 # --- Dev ---

@@ -81,13 +81,12 @@ def test_timing_settings_clamped(monkeypatch):
 
 
 def test_settings_require_raises_on_missing():
-    settings = Settings(openrouter_api_key="")
-    with pytest.raises(ConfigError, match="OPENROUTER_API_KEY"):
-        settings.require("openrouter_api_key")
+    with pytest.raises(ConfigError, match="OUTPUT_DIR"):
+        Settings(output_dir="").require("output_dir")
 
 
 def test_settings_require_passes_when_set():
-    Settings(openrouter_api_key="k").require("openrouter_api_key")
+    Settings(output_dir="./out").require("output_dir")
 
 
 def test_subtitle_style_from_settings(monkeypatch):
@@ -107,60 +106,6 @@ def test_subtitle_position_typo_falls_back(monkeypatch):
     assert Settings.load().subtitle_position == "bottom"
 
 
-def test_translate_configured_rejects_placeholder_key():
-    """API Key trong tệp mẫu phải bị coi là CHƯA điền."""
-    base = dict(translate_engine="openrouter",
-                openrouter_url="https://x/v1/chat/completions",
-                openrouter_model="m")
-    assert not Settings(**base, openrouter_api_key="").translate_configured()
-    assert not Settings(**base,
-                        openrouter_api_key="sk_your_key_here").translate_configured()
-    assert Settings(**base, openrouter_api_key="sk-abc123").translate_configured()
-
-
-def test_translate_configured_needs_url_and_model():
-    """Thiếu địa chỉ hoặc tên mô hình cũng là chưa đủ để chạy."""
-    assert not Settings(translate_engine="deepseek",
-                        deepseek_api_key="k", deepseek_url="",
-                        deepseek_model="m").translate_configured()
-    assert not Settings(translate_engine="deepseek", deepseek_api_key="k",
-                        deepseek_url="https://x", deepseek_model="").translate_configured()
-
-
-def test_translate_configured_off_when_disabled():
-    assert not Settings(translate_enabled=False, translate_engine="gemini",
-                        google_api_key="k",
-                        gemini_translate_model="m").translate_configured()
-
-
-def test_gemini_needs_no_url():
-    """Gemini đi qua thư viện riêng nên không cần địa chỉ máy chủ."""
-    s = Settings(translate_engine="gemini", google_api_key="k",
-                 gemini_translate_model="gemini-flash-latest")
-    assert s.translate_configured()
-    key, url, model = s.translate_credentials()
-    assert (key, url, model) == ("k", "", "gemini-flash-latest")
-
-
-def test_unknown_engine_falls_back_to_openrouter(monkeypatch):
-    monkeypatch.setattr("autodub.config.load_dotenv", lambda *a, **kw: None)
-    monkeypatch.setenv("TRANSLATE_ENGINE", "khong-co-that")
-    assert Settings.load().translate_engine == "openrouter"
-
-
-def test_provider_defaults(monkeypatch):
-    """Mỗi nơi dịch có sẵn địa chỉ và mô hình mặc định dùng được ngay."""
-    monkeypatch.setattr("autodub.config.load_dotenv", lambda *a, **kw: None)
-    for name in ("OPENROUTER", "OPENAI", "ANTHROPIC", "DEEPSEEK"):
-        for suffix in ("URL", "MODEL", "API_KEY"):
-            monkeypatch.delenv(f"{name}_{suffix}", raising=False)
-    s = Settings.load()
-    for engine in ("openrouter", "openai", "anthropic", "deepseek"):
-        _key, url, model = s.translate_credentials(engine)
-        assert url.startswith("https://"), engine
-        assert model, engine
-
-
 def test_vi_output_dir_default_and_override():
     assert Settings(output_dir="./out").vi_output_dir().replace("\\", "/") == "./out/VN"
     assert Settings(vietnamese_output_dir="D:/VN").vi_output_dir() == "D:/VN"
@@ -168,13 +113,19 @@ def test_vi_output_dir_default_and_override():
 
 def test_translate_defaults(monkeypatch):
     monkeypatch.setattr("autodub.config.load_dotenv", lambda *a, **kw: None)
-    for var in ("TRANSLATE_ENGINE", "TRANSLATE_ENABLED",
-                "TRANSLATE_BATCH_SIZE"):
+    for var in ("TRANSLATE_ENABLED", "TRANSLATE_BATCH_SIZE"):
         monkeypatch.delenv(var, raising=False)
     s = Settings.load()
-    assert s.translate_engine == "openrouter"
     assert s.translate_enabled is True
     assert s.translate_batch_size == 40
+
+
+def test_translate_batch_size_capped_at_server_limit(monkeypatch):
+    """Máy chủ từ chối lô quá 120 câu — kẹp ngay ở đây để không bao giờ gửi
+    một request chắc chắn bị trả về 400."""
+    monkeypatch.setattr("autodub.config.load_dotenv", lambda *a, **kw: None)
+    monkeypatch.setenv("TRANSLATE_BATCH_SIZE", "500")
+    assert Settings.load().translate_batch_size == 100
 
 
 def test_translate_enabled_off(monkeypatch):
@@ -254,9 +205,10 @@ def test_vieneu_workers_adaptive_by_ram(monkeypatch):
     monkeypatch.delenv("VIENEU_MAX_WORKERS", raising=False)
     monkeypatch.setattr("autodub.config.os.cpu_count", lambda: 16)
 
+    # RAM dư nhiều → dùng tới trần tự tính (máy khỏe không còn bị kẹp ở 3)
     monkeypatch.setattr("autodub.sysinfo.available_ram_gb", lambda: 12.0)
     config._governor_logged = True   # đã log rồi — test không cần log
-    assert Settings.load().vieneu_max_workers == 3
+    assert Settings.load().vieneu_max_workers == 6
 
     monkeypatch.setattr("autodub.sysinfo.available_ram_gb", lambda: 7.0)
     assert Settings.load().vieneu_max_workers == 2

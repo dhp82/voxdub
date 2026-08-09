@@ -18,10 +18,10 @@ import os
 import queue
 import subprocess
 import threading
-
-from pydub import AudioSegment
+from concurrent.futures import ThreadPoolExecutor
 
 from autodub.config import Settings
+from autodub.resources import cpu_share
 from autodub.speech.tts.base import TTSResult, write_silence
 from autodub.utils import bundled_file, setup_logging
 
@@ -49,6 +49,9 @@ class _VieNeuWorker:
         # Last stderr lines of the worker — the only diagnostics when it
         # dies. A daemon thread drains the pipe so it can never fill up.
         self._stderr_tail: collections.deque[str] = collections.deque(maxlen=30)
+        # A4 fix: persistent reader queue instead of a new thread per response.
+        # Initialized empty; _start() creates a new queue and reader thread.
+        self._resp_queue: queue.Queue[str | None] = queue.Queue()
 
     def _drain_stderr(self, stream) -> None:
         try:
@@ -63,6 +66,25 @@ class _VieNeuWorker:
         return "\n".join(list(self._stderr_tail)[-10:])
 
     # --- lifecycle --------------------------------------------------------
+
+    def _pump_stdout(self, stream) -> None:
+        """Persistent reader thread — pumps JSON lines into _resp_queue.
+
+        Putting None signals that the stream closed (process died).
+        A4 fix: one long-lived thread instead of a new thread per response.
+        """
+        try:
+            for raw in stream:
+                raw = raw.rstrip()
+                if not raw:
+                    continue
+                if raw.lstrip().startswith("{"):
+                    self._resp_queue.put(raw)
+                # else: skip non-JSON diagnostic lines the worker may emit
+        except (ValueError, OSError):
+            pass
+        finally:
+            self._resp_queue.put(None)   # sentinel: stream closed
 
     def _start(self) -> None:
         settings = self._owner.settings
@@ -86,8 +108,14 @@ class _VieNeuWorker:
             encoding="utf-8",
             errors="replace",
         )
+        # Reset the response queue — each (re)start gets a clean queue so
+        # stale sentinels from a previous dead process don't confuse us.
+        self._resp_queue = queue.Queue()
         threading.Thread(target=self._drain_stderr,
                          args=(self._proc.stderr,), daemon=True).start()
+        threading.Thread(target=self._pump_stdout,
+                         args=(self._proc.stdout,), daemon=True,
+                         name=f"vieneu-stdout-{self._idx}").start()
         ready = self._read_response(STARTUP_TIMEOUT)
         if not ready.get("ready"):
             raise RuntimeError(
@@ -121,28 +149,32 @@ class _VieNeuWorker:
                         pass
 
     def _read_response(self, timeout: float) -> dict:
-        """Read the next JSON line from the worker (thread-based timeout)."""
-        result: list[str] = []
+        """Read the next JSON line from the persistent stdout reader queue.
 
-        def _read() -> None:
-            while True:
-                line = self._proc.stdout.readline()
-                if not line or line.lstrip().startswith("{"):
-                    result.append(line)
-                    return
-
-        t = threading.Thread(target=_read, daemon=True)
-        t.start()
-        t.join(timeout)
-        if t.is_alive() or not result or not result[0]:
-            self._proc.kill()
+        A4 fix: no new thread per call — the persistent _pump_stdout thread
+        puts lines into _resp_queue; we just block here with a timeout.
+        None in the queue means the stream closed (worker died).
+        """
+        try:
+            line = self._resp_queue.get(timeout=timeout)
+        except queue.Empty:
+            if self._proc is not None:
+                self._proc.kill()
             raise RuntimeError(
-                f"VieNeu worker timed out or died\n{self._tail()}")
-        return json.loads(result[0])
+                f"VieNeu worker timed out after {timeout}s\n{self._tail()}")
+        if line is None:
+            raise RuntimeError(
+                f"VieNeu worker stream closed unexpectedly\n{self._tail()}")
+        return json.loads(line)
 
     # --- synthesis --------------------------------------------------------
 
-    def render(self, text: str, output_path: str) -> None:
+    def render(self, text: str, output_path: str) -> float:
+        """Render text to WAV and return the actual duration in seconds.
+
+        The worker reports duration in its JSON response — we use that
+        directly instead of re-reading the WAV file with pydub (A1 fix).
+        """
         self.ensure()
         req = {"text": text, "out": output_path}
         try:
@@ -159,11 +191,11 @@ class _VieNeuWorker:
                            "— restarting once...")
             self._restarted = True
             self.close()
-            self.render(text, output_path)
-            return
+            return self.render(text, output_path)
         if not resp.get("ok"):
             raise RuntimeError(f"VieNeu synthesis failed: {resp.get('error')}")
         self._restarted = False
+        return float(resp.get("duration", 0.0))
 
 
 class VieNeuSynthesizer:
@@ -175,8 +207,10 @@ class VieNeuSynthesizer:
         self.voice_name = voice_name
         n = max(1, num_workers)
         # Partition CPU cores across workers so N ONNX sessions don't fight
-        # over every core (oversubscription is a net loss).
-        self.intra_threads = max(1, (os.cpu_count() or 4) // n)
+        # over every core (oversubscription is a net loss). cpu_share chừa
+        # thêm vài lõi cho GUI và cho các slot ffmpeg — TTS không chạy một
+        # mình trên máy.
+        self.intra_threads = cpu_share(n)
         self._start_lock = threading.Lock()
         # Guards _workers/_free against concurrent mutation (warm-up thread
         # dropping a failed worker vs. dispatch threads pulling from _free).
@@ -196,28 +230,37 @@ class VieNeuSynthesizer:
             return max(1, len(self._workers))
 
     def warm_up_async(self) -> None:
-        """Start the workers in a background thread; safe to call repeatedly.
+        """Khởi động tất cả worker song song trong một background thread.
 
-        CPU-only — no VRAM contention with Whisper/Demucs, so the
-        pipeline can warm as early as it likes. Extra workers that fail to
-        start are dropped (the run degrades instead of dying).
+        CPU-only — không tranh VRAM với Whisper/Demucs, nên pipeline có thể
+        gọi sớm mà không cần chờ Demucs xong. Worker nào khởi động lỗi sẽ bị
+        loại; run tiếp tục với ít luồng hơn thay vì dừng hẳn.
+
+        A2 fix: dùng ThreadPoolExecutor để load tất cả worker song song thay
+        vì tuần tự — 3 worker × 30-60s → giảm từ ~3 phút xuống ~1 phút.
         """
-        def _warm() -> None:
-            for w in list(self._workers):
-                try:
-                    w.ensure()
-                except Exception as e:
-                    if w._idx == 0:
-                        logger.warning(
-                            f"Không khởi động sớm được VieNeu ({e}) — "
-                            "sẽ thử lại ở bước tạo giọng")
-                    else:
-                        logger.warning(
-                            f"[worker {w._idx}] Không khởi động được ({e}) — "
-                            "chạy tiếp với ít luồng hơn")
-                        self._drop_worker(w)
+        def _warm_one(w: _VieNeuWorker) -> None:
+            try:
+                w.ensure()
+            except Exception as e:
+                if w._idx == 0:
+                    logger.warning(
+                        f"Không khởi động sớm được VieNeu ({e}) — "
+                        "sẽ thử lại ở bước tạo giọng")
+                else:
+                    logger.warning(
+                        f"[worker {w._idx}] Không khởi động được ({e}) — "
+                        "chạy tiếp với ít luồng hơn")
+                    self._drop_worker(w)
 
-        threading.Thread(target=_warm, daemon=True).start()
+        def _warm() -> None:
+            workers = list(self._workers)
+            with ThreadPoolExecutor(max_workers=len(workers),
+                                    thread_name_prefix="vieneu-warm") as ex:
+                # submit tất cả rồi chờ — lỗi được bắt trong _warm_one
+                list(ex.map(_warm_one, workers))
+
+        threading.Thread(target=_warm, daemon=True, name="vieneu-warmup").start()
 
     def _drop_worker(self, w: _VieNeuWorker) -> None:
         """Remove a worker that cannot start (e.g. RAM exhausted)."""
@@ -252,7 +295,8 @@ class VieNeuSynthesizer:
 
     # --- synthesis --------------------------------------------------------
 
-    def _render(self, text: str, output_path: str) -> None:
+    def _render(self, text: str, output_path: str) -> float:
+        """Render text to WAV via a free worker; returns actual duration (s)."""
         output_path = os.path.abspath(output_path)
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
         # Bounded wait: if the pool ever loses a worker (drop-race, crash),
@@ -264,7 +308,7 @@ class VieNeuSynthesizer:
                 "Không còn luồng VieNeu nào rảnh (worker chết hoặc kẹt) — "
                 "thử chạy lại; nếu lặp lại, giảm VIENEU_MAX_WORKERS")
         try:
-            w.render(text, output_path)
+            return w.render(text, output_path)
         finally:
             self._free.put(w)
 
@@ -280,6 +324,8 @@ class VieNeuSynthesizer:
         slows the picture, VOICE_SPEED is applied to every clip uniformly
         after TTS). ``target_duration`` is accepted for engine-interface
         compatibility and ignored.
+
+        Duration comes directly from the worker response — no extra disk read.
         """
         # Numbers must be spelled out for clean reading. NO lowercasing —
         # VieNeu is trained on cased text (better for brand names).
@@ -290,9 +336,8 @@ class VieNeuSynthesizer:
             # đẩy chuỗi rỗng vào model (crash/treo cả run vì một dòng).
             return write_silence(output_path)
 
-        self._render(text, output_path)
-        audio = AudioSegment.from_file(output_path)
-        actual_duration = len(audio) / 1000.0
+        # A1 fix: duration trả thẳng từ worker JSON, không đọc lại file WAV.
+        actual_duration = self._render(text, output_path)
 
         return TTSResult(
             path=output_path,

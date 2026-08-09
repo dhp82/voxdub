@@ -94,7 +94,7 @@ QWidget {{
     font-size: {_t.FS_BODY}px;
 }}
 QMainWindow {{ background: {_t.BG_APP}; }}
-QDialog {{ background: {_t.BG_MAIN}; }}
+QDialog {{ background: {_t.BG_PANEL}; }}
 
 /* ---- Thanh điều hướng bên trái ---- */
 QListWidget#nav, QListWidget#nav2 {{
@@ -118,9 +118,13 @@ QListWidget#nav::item:hover, QListWidget#nav2::item:hover {{
     color: {_t.TEXT_PRIMARY};
 }}
 QListWidget#nav::item:selected, QListWidget#nav2::item:selected {{
-    background: {_grad_h(_t.NAV_SEL_GRAD_A, _t.NAV_SEL_GRAD_B)};
-    color: {_t.TEXT_ON_ACCENT};
+    background: {_t.BG_SELECTED};
+    color: {_t.PRIMARY};
     font-weight: 600;
+}}
+QListWidget#nav::item:selected:hover, QListWidget#nav2::item:selected:hover {{
+    background: {_t.BG_SELECTED};
+    color: {_t.PRIMARY};
 }}
 
 /* ---- Thẻ nội dung ---- */
@@ -130,7 +134,6 @@ QFrame#card {{
     border-radius: 10px;
 }}
 QFrame#card:hover {{
-    background: {_t.BG_PANEL_HOVER};
     border-color: {_t.BORDER_DEFAULT};
 }}
 QFrame#cardFlat {{
@@ -210,7 +213,7 @@ QComboBox QAbstractItemView {{
     border: 1px solid {_t.BORDER_DEFAULT};
     border-radius: 10px;
     selection-background-color: {_t.BG_SELECTED};
-    selection-color: {_t.TEXT_PRIMARY};
+    selection-color: {_t.PRIMARY};
     outline: none;
     padding: 5px;
 }}
@@ -226,7 +229,7 @@ QComboBox QAbstractItemView::item:hover {{
 }}
 QComboBox QAbstractItemView::item:selected {{
     background: {_t.BG_SELECTED};
-    color: {_t.TEXT_PRIMARY};
+    color: {_t.PRIMARY};
 }}
 QSpinBox::up-button, QSpinBox::down-button,
 QDoubleSpinBox::up-button, QDoubleSpinBox::down-button {{
@@ -265,7 +268,7 @@ QPushButton:disabled {{
 }}
 
 QPushButton#primary {{
-    background: {_grad_h(_t.PRIMARY, _t.PRIMARY_GRAD_B)};
+    background: {_t.PRIMARY};
     border: none;
     color: {_t.TEXT_ON_ACCENT};
     font-weight: 600;
@@ -273,9 +276,15 @@ QPushButton#primary {{
     border-radius: {_t.RADIUS_MD}px;
 }}
 QPushButton#primary:hover {{
-    background: {_grad_h(_t.PRIMARY_HOVER, _t.PRIMARY_GRAD_B_HOVER)};
+    background: {_t.PRIMARY_HOVER};
+    color: {_t.TEXT_ON_ACCENT};
 }}
-QPushButton#primary:pressed {{ background: {_t.PRIMARY_DARK}; }}
+QPushButton#primary:pressed {{ background: {_t.PRIMARY_DARK}; color: {_t.TEXT_ON_ACCENT}; }}
+QPushButton#primary:focus {{
+    background: {_t.PRIMARY_HOVER};
+    border: 2px solid {_t.PRIMARY_DARK};
+    color: {_t.TEXT_ON_ACCENT};
+}}
 QPushButton#primary:disabled {{
     background: {_t.PRIMARY_DISABLED_BG};
     color: {_t.TEXT_DISABLED};
@@ -298,15 +307,24 @@ QPushButton#danger:disabled {{
 }}
 
 QPushButton#ghost {{
-    background: transparent;
-    border: 1px solid {_t.BORDER_SUBTLE};
+    background: {_t.BG_BUTTON};
+    border: 1px solid {_t.BORDER_DEFAULT};
     color: {_t.TEXT_SECONDARY};
     font-weight: 500;
 }}
 QPushButton#ghost:hover {{
-    background: {_t.BG_PANEL_HOVER};
+    background: {_t.BG_SELECTED_SOFT};
     color: {_t.TEXT_PRIMARY};
-    border-color: {_t.BORDER_DEFAULT};
+    border-color: {_t.PRIMARY};
+}}
+QPushButton#ghost:pressed {{
+    background: {_t.BG_SELECTED};
+    color: {_t.TEXT_PRIMARY};
+    border-color: {_t.PRIMARY};
+}}
+QPushButton#ghost:focus {{
+    border-color: {_t.BORDER_ACTIVE};
+    color: {_t.TEXT_PRIMARY};
 }}
 QPushButton#ghost:disabled {{ color: {_t.TEXT_DISABLED}; background: transparent; }}
 
@@ -330,6 +348,14 @@ QPushButton#segment {{
     font-size: {_t.FS_BODY}px;
     font-weight: 500;
     color: {_t.TEXT_SECONDARY};
+}}
+QPushButton#segment[position="first"] {{
+    border-top-left-radius: {_t.RADIUS_MD}px;
+    border-bottom-left-radius: {_t.RADIUS_MD}px;
+}}
+QPushButton#segment[position="last"] {{
+    border-top-right-radius: {_t.RADIUS_MD}px;
+    border-bottom-right-radius: {_t.RADIUS_MD}px;
 }}
 QPushButton#segment:hover:!checked {{
     background: {_t.BG_PANEL_HOVER};
@@ -391,7 +417,7 @@ QPushButton#pillTab:hover:!checked {{
     color: {_t.TEXT_PRIMARY};
 }}
 QPushButton#pillTab:checked {{
-    background: {_grad_h(_t.PRIMARY, _t.PRIMARY_GRAD_B)};
+    background: {_t.PRIMARY};
     color: {_t.TEXT_ON_ACCENT};
 }}
 
@@ -558,6 +584,7 @@ QSlider::sub-page:horizontal {{
 QSlider::handle:horizontal {{
     width: 14px; height: 14px; margin: -5px 0;
     border-radius: 7px; background: {_t.TEXT_ON_ACCENT};
+    border: 1px solid {_t.BORDER_DEFAULT};
 }}
 QSlider::handle:horizontal:disabled {{ background: {_t.TEXT_DISABLED}; }}
 QSlider::sub-page:horizontal:disabled {{ background: {_t.BORDER_DEFAULT}; }}

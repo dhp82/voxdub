@@ -39,6 +39,7 @@ from autodub_gui.ui.toast import TOASTS
 from autodub_gui.widgets import LogPanel
 from autodub_gui.workers import BatchWorker
 from autodub_gui.ui.style import clear_background
+from autodub_gui.log_text import Narrator, error_line
 
 _PAGE_MARGIN = 28
 _THUMB_W, _THUMB_H = 56, 32
@@ -88,6 +89,7 @@ class BatchPage(BasePage):
         self._shared_style: dict | None = None
         self._shared_regions: list[dict] = []
         self._rows: dict[str, int] = {}
+        self._narrator = Narrator()
         self._build()
         self.setAcceptDrops(True)
         self._load_queue()
@@ -253,6 +255,12 @@ class BatchPage(BasePage):
         self.opt_duck.setEnabled(False)
         self.opt_subtitle = LabeledCombo("Phụ đề", consts.SUBTITLE_MODES,
                                          "Cách hiện phụ đề trên video kết quả")
+        # Chọn sẵn theo Cài đặt — trước đây luôn rơi về "Không" dù người
+        # dùng đã đặt kiểu phụ đề mặc định khác.
+        try:
+            self.opt_subtitle.set_key(self._settings_provider().subtitle_mode)
+        except Exception:  # noqa: BLE001 — cấu hình hỏng thì giữ mặc định
+            pass
         section.add_layout(self._grid(
             [self.opt_lang, self.opt_voice, self.opt_bg, self.opt_duck,
              self.opt_subtitle, self._build_style_block()]))
@@ -600,6 +608,43 @@ class BatchPage(BasePage):
             return
         self._launch([item])
 
+    def _warn_if_low_credit(self, count: int) -> bool:
+        """Cảnh báo khi ví không đủ cho một lượt chạy hàng loạt.
+
+        Không gọi mạng: đọc số dư đã lấy về lúc khởi động và cập nhật sau mỗi
+        video. Chạy 30 video rồi hết Vox ở video thứ 8 là kiểu hỏng tệ nhất —
+        mất thời gian tách nhạc và nghe chép của 22 video còn lại. Chặn trước
+        thì người dùng nạp thêm rồi chạy một lần cho xong.
+
+        Trả về True nếu người dùng vẫn muốn chạy tiếp.
+        """
+        from autodub.saas_client import get_client
+
+        client = get_client()
+        device = client.device
+        if not device or not device.get("creditEnabled", True):
+            return True
+        balance = int(device.get("balance", 0))
+        # Giá theo segment: 10 Vox nền (+2 nếu bật dịch tự động, +20 cho gói
+        # đăng bài). Một video chừng 150-400 câu; lấy 150 câu × 10 Vox làm
+        # mốc dè dặt để không dọa người dùng khi họ thật sự đủ Vox.
+        needed = count * 150 * 10
+        if balance >= needed:
+            return True
+
+        confirmed, _ = ConfirmDialog.ask(
+            self, "Có thể không đủ Vox",
+            (f"Bạn còn {balance:,} Vox. Chạy {count} video thường tốn khoảng "
+             f"{needed:,} Vox trở lên (tính theo số câu thoại của từng "
+             "video), nên lượt chạy có thể dừng giữa chừng vì hết Vox."
+             "\n\nVideo đã xong vẫn giữ nguyên; các video sau dừng ngay sau "
+             "bước nghe-chép (chưa bị trừ Vox) và chạy tiếp được sau khi "
+             "bạn nạp thêm."
+             ).replace(",", "."),
+            kind="warning", confirm_label="Vẫn chạy",
+            cancel_label="Để tôi nạp thêm")
+        return confirmed
+
     def _launch(self, items: list[BatchItem]) -> None:
         if self.is_running():
             TOASTS.warn("Đang có video chạy dở. Hãy đợi xong hoặc bấm Dừng.")
@@ -609,8 +654,11 @@ class BatchPage(BasePage):
             TOASTS.warn(f"Đang chạy «{job.title}» ở trang khác. "
                         "Hãy đợi xong hoặc dừng việc đó trước.")
             return
+        if not self._warn_if_low_credit(len(items)):
+            return
         self._pending_adds -= {it.key for it in items}
-        self.log.clear()
+        self.log.reset_log()
+        self._narrator.reset()
         for item in items:
             if self._state.get(item.key) != DONE or self.chk_retry.isChecked():
                 self._state[item.key] = WAITING
@@ -625,6 +673,7 @@ class BatchPage(BasePage):
         worker.progress.connect(self._on_progress)
         worker.item_status.connect(self._on_item_status)
         worker.log.connect(self.log.append_log)
+        worker.progress.connect(self._on_progress_log)
         worker.finished_ok.connect(self._on_finished)
         worker.failed.connect(self._on_failed)
         worker.cancelled.connect(self._on_cancelled)
@@ -670,6 +719,14 @@ class BatchPage(BasePage):
     def _on_progress(self, event) -> None:
         """Đưa tiến độ của video đang chạy vào đúng dòng của nó."""
         REGISTRY.update_job(event)
+        # Pipeline báo work_dir trong sự kiện «acquire/start» — gắn vào việc
+        # đang chạy để chuông thông báo mở được thư mục của video hiện tại.
+        if (getattr(event, "step", "") == "acquire"
+                and getattr(event, "status", "") == "start"
+                and getattr(event, "detail", "")):
+            job = REGISTRY.current()
+            if job is not None:
+                job.work_dir = event.detail
         key = self._current_key
         if not key:
             return
@@ -716,6 +773,9 @@ class BatchPage(BasePage):
         self._chain_next = bool(self._pending_adds)
 
     def _on_failed(self, message: str) -> None:
+        import logging as _log
+        text, level = error_line(message)
+        self.log.append_log(text, level)
         REGISTRY.finish_job(False, message[:120])
         friendly = consts.friendly_error(message)
         if friendly is not None:
@@ -728,7 +788,8 @@ class BatchPage(BasePage):
             "xong vẫn còn nguyên kết quả trên máy.", detail=message)
 
     def _on_cancelled(self) -> None:
-        self.log.append_log("Đã dừng theo yêu cầu của bạn.", 30)
+        import logging as _log
+        self.log.append_log("Đã dừng theo yêu cầu của bạn.", _log.WARNING)
         for key, state in self._state.items():
             if state == RUNNING:
                 self._state[key] = PAUSED
@@ -736,6 +797,14 @@ class BatchPage(BasePage):
         self._refresh_table()
         TOASTS.info("Đã dừng. Video đang dở sẽ chạy tiếp từ chỗ dừng khi bạn "
                     "bấm chạy lại.")
+
+    def _on_progress_log(self, event) -> None:
+        """Kể lại tiến trình bằng lời thường vào Nhật ký."""
+        result = self._narrator.narrate(event)
+        if result is None:
+            return
+        text, level, is_progress = result
+        self.log.append_log(text, level, is_progress=is_progress)
 
     def _open_result(self, key: str) -> None:
         detail = self._detail.get(key, "")

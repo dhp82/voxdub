@@ -38,13 +38,56 @@ def source_for(work_dir: str) -> str:
     return ""
 
 
-def _cache_path(wav_path: str) -> str:
-    return os.path.join(os.path.dirname(wav_path), CACHE_NAME)
+# Các track của dải thời gian nhiều lớp: (loại, các tên tệp theo thứ tự ưu tiên)
+# Nhạc nền: ưu tiên slowed_background.wav vì nó đã theo nhịp video cuối
+# (khi có làm chậm); no_vocals.wav ở tốc độ gốc chỉ là phương án dự phòng.
+_TRACK_SOURCES = (
+    ("original", ("original_audio.wav",)),
+    ("voice", ("audio_vi_full.wav",)),
+    ("music", ("slowed_background.wav", "no_vocals.wav")),
+)
 
 
-def _read_cache(wav_path: str, buckets: int) -> list[float] | None:
+def track_sources(work_dir: str) -> dict[str, str]:
+    """Đường dẫn âm thanh cho từng track đang có mặt trong dự án.
+
+    Chỉ trả về track mà tệp thật sự tồn tại — track thiếu sẽ bị ẩn
+    trên dải thời gian thay vì vẽ dải phẳng giả.
+    """
+    from autodub.workdir import data_path
+
+    found: dict[str, str] = {}
+    for kind, names in _TRACK_SOURCES:
+        for name in names:
+            path = data_path(work_dir, name)
+            if os.path.isfile(path):
+                found[kind] = path
+                break
+    return found
+
+
+def cache_name_for(wav_path: str) -> str:
+    """Tên tệp đệm riêng cho từng nguồn âm thanh.
+
+    Chỉ `audio_vi_full.wav` (nguồn chính, trùng với dải đơn cũ) giữ tên
+    `waveform_peaks.json` để tận dụng đệm sẵn có; mọi nguồn khác dùng tên
+    theo gốc tệp — hai track không bao giờ ghi đè đệm của nhau.
+    """
+    base = os.path.basename(wav_path)
+    if base == "audio_vi_full.wav":
+        return CACHE_NAME
+    stem = os.path.splitext(base)[0]
+    return f"waveform_peaks_{stem}.json"
+
+
+def _cache_path(wav_path: str, cache_name: str | None = None) -> str:
+    return os.path.join(os.path.dirname(wav_path), cache_name or CACHE_NAME)
+
+
+def _read_cache(wav_path: str, buckets: int,
+                cache_name: str | None = None) -> list[float] | None:
     """Đọc bộ nhớ đệm nếu nó còn khớp với tệp âm thanh hiện tại."""
-    path = _cache_path(wav_path)
+    path = _cache_path(wav_path, cache_name)
     if not os.path.isfile(path):
         return None
     try:
@@ -62,10 +105,12 @@ def _read_cache(wav_path: str, buckets: int) -> list[float] | None:
         return None
 
 
-def _write_cache(wav_path: str, buckets: int, peaks: list[float]) -> None:
+def _write_cache(wav_path: str, buckets: int, peaks: list[float],
+                 cache_name: str | None = None) -> None:
     """Ghi bộ nhớ đệm; hỏng thì bỏ qua vì đây chỉ là thứ giúp chạy nhanh hơn."""
     try:
-        with open(_cache_path(wav_path), "w", encoding="utf-8") as f:
+        with open(_cache_path(wav_path, cache_name), "w",
+                  encoding="utf-8") as f:
             json.dump({
                 "version": _CACHE_VERSION,
                 "src": os.path.basename(wav_path),
@@ -78,7 +123,7 @@ def _write_cache(wav_path: str, buckets: int, peaks: list[float]) -> None:
 
 
 def peaks(wav_path: str, buckets: int = DEFAULT_BUCKETS,
-          use_cache: bool = True) -> list[float]:
+          use_cache: bool = True, cache_name: str | None = None) -> list[float]:
     """Biên độ lớn nhất của từng đoạn, quy về khoảng từ 0 tới 1.
 
     Trả về danh sách rỗng khi tệp không đọc được hoặc không phải WAV dạng
@@ -87,12 +132,12 @@ def peaks(wav_path: str, buckets: int = DEFAULT_BUCKETS,
     if buckets <= 0 or not wav_path or not os.path.isfile(wav_path):
         return []
     if use_cache:
-        cached = _read_cache(wav_path, buckets)
+        cached = _read_cache(wav_path, buckets, cache_name)
         if cached is not None:
             return cached
     result = _compute_peaks(wav_path, buckets)
     if result and use_cache:
-        _write_cache(wav_path, buckets, result)
+        _write_cache(wav_path, buckets, result, cache_name)
     return result
 
 
@@ -144,12 +189,20 @@ def _scan(source, dtype, width: int, channels: int,
 
 
 def clear_cache(work_dir: str) -> bool:
-    """Xóa bộ nhớ đệm dạng sóng của một dự án."""
+    """Xóa bộ nhớ đệm dạng sóng của một dự án — gồm cả các track phụ."""
     from autodub.workdir import data_path
 
-    path = data_path(work_dir, CACHE_NAME)
+    folder = os.path.dirname(data_path(work_dir, CACHE_NAME))
+    removed = False
     try:
-        os.remove(path)
-        return True
+        names = os.listdir(folder)
     except OSError:
         return False
+    for name in names:
+        if name.startswith("waveform_peaks") and name.endswith(".json"):
+            try:
+                os.remove(os.path.join(folder, name))
+                removed = True
+            except OSError:
+                continue
+    return removed

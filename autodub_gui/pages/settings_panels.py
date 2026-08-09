@@ -18,7 +18,6 @@ from autodub_gui import tokens
 from autodub_gui.status_text import STATUS_OK, STATUS_WARN
 from autodub_gui.ui.buttons import GhostButton
 from autodub_gui.ui.collapsible import CollapsibleSection
-from autodub_gui.ui.inputs import LabeledCombo
 from autodub_gui.ui.modal import ConfirmDialog
 from autodub_gui.ui.toast import TOASTS
 from autodub_gui.voice_picker import VoicePicker
@@ -312,40 +311,33 @@ class VoiceSettingsPanel(CollapsibleSection):
 
 
 class ConnectionChecks(CollapsibleSection):
-    """Thử gọi thật tới nơi dịch đang chọn, và tới Gemini."""
+    """Thử kết nối tới máy chủ VoxDub và hiện số Vox còn lại.
 
-    def __init__(self, values_provider, parent: QWidget | None = None):
+    Không còn API Key nào để kiểm tra: mô hình và mã đều nằm trên máy chủ.
+    Thứ người dùng cần biết khi nghi ngờ chỉ còn hai điều — máy chủ có trả
+    lời không, và ví còn bao nhiêu.
+    """
+
+    def __init__(self, values_provider=None, parent: QWidget | None = None):
         super().__init__("Kiểm tra kết nối", expanded=False, parent=parent)
-        self._values_provider = values_provider
+        del values_provider     # giữ chữ ký cũ cho các nơi đang gọi
         self._threads: dict[str, QThread] = {}
         self._labels: dict[str, QLabel] = {}
 
-        self.engine = LabeledCombo(
-            "Kiểm tra nơi nào", [], "Chọn nơi dịch muốn thử rồi bấm Kiểm tra.")
-        from autodub_gui import dub_constants as consts
-        self.engine.set_options(consts.TRANSLATE_ENGINE_CHOICES)
-        self.add_widget(self.engine)
-
-        for key, text, probe in (
-            ("engine", "Kiểm tra nơi dịch", self._probe_engine),
-            ("gemini", "Kiểm tra Gemini (ảnh bìa và nội dung)",
-             self._probe_gemini),
-        ):
-            row = QHBoxLayout()
-            row.setSpacing(tokens.SP_2)
-            button = GhostButton(text)
-            label = _hint_label("")
-            self._labels[key] = label
-            button.clicked.connect(
-                lambda _c=False, k=key, b=button, p=probe: self._run(k, b, p))
-            row.addWidget(button)
-            row.addWidget(label, 1)
-            self.add_layout(row)
+        row = QHBoxLayout()
+        row.setSpacing(tokens.SP_2)
+        button = GhostButton("Kiểm tra máy chủ VoxDub")
+        label = _hint_label("")
+        self._labels["server"] = label
+        button.clicked.connect(
+            lambda _c=False, b=button: self._run("server", b, self._probe_server))
+        row.addWidget(button)
+        row.addWidget(label, 1)
+        self.add_layout(row)
 
     def select_engine(self, engine: str) -> None:
-        """Đồng bộ ô chọn với nơi dịch đang đặt ở trên."""
-        if engine:
-            self.engine.set_key(engine)
+        """Giữ chữ ký cũ — không còn nơi dịch nào để chọn."""
+        del engine
 
     def _run(self, key: str, button: GhostButton, probe) -> None:
         """Chạy phép thử ở luồng nền để cửa sổ không bị đứng."""
@@ -381,61 +373,22 @@ class ConnectionChecks(CollapsibleSection):
             if checker.isRunning():
                 checker.wait(10_000)
 
-    def _settings_from_form(self):
-        """Bản cấu hình phản ánh đúng những gì đang gõ trên màn hình.
+    @staticmethod
+    def _probe_server() -> str:
+        from autodub.saas_client import SaasError, get_client, is_configured
 
-        Kiểm tra kết nối phải thử ĐÚNG giá trị người dùng vừa nhập, kể cả khi
-        họ chưa bấm Lưu — nếu không thì phép thử báo kết quả của cấu hình cũ.
-        """
-        from dataclasses import replace
-
-        from autodub.config import Settings
-
-        values = self._values_provider()
-        settings = Settings.load(override=True)
-        changes: dict = {"translate_enabled": True}
-        for key, attr in (
-            ("GOOGLE_API_KEY", "google_api_key"),
-            ("GEMINI_TRANSLATE_MODEL", "gemini_translate_model"),
-            ("CONTENT_MODEL_ID", "content_model_id"),
-        ):
-            if values.get(key) is not None:
-                changes[attr] = values.get(key, "").strip()
-        for name in ("openrouter", "openai", "anthropic", "deepseek", "custom"):
-            for suffix, attr in (("API_KEY", "api_key"), ("URL", "url"),
-                                 ("MODEL", "model")):
-                raw = values.get(f"{name.upper()}_{suffix}")
-                if raw is not None:
-                    changes[f"{name}_{attr}"] = raw.strip()
-        return replace(settings, **changes)
-
-    def _probe_engine(self) -> str:
-        engine = self.engine.current_key() or "openrouter"
-        settings = self._settings_from_form()
-        if engine == "gemini":
-            return self._probe_gemini()
-        from autodub.text.translate_openai import check_model, label_of
-
-        key, url, model = settings.translate_credentials(engine)
-        if not key:
-            return (f"{STATUS_WARN} Chưa điền API Key {label_of(engine)} ở "
-                    "nhóm bên trên.")
-        if not url or not model:
-            return (f"{STATUS_WARN} Chưa điền địa chỉ máy chủ hoặc tên mô "
-                    f"hình cho {label_of(engine)}.")
-        ok, message = check_model(settings, engine)
-        return f"{STATUS_OK if ok else STATUS_WARN} {message}"
-
-    def _probe_gemini(self) -> str:
-        from autodub.text.translate_gemini import check_model
-
-        settings = self._settings_from_form()
-        if not settings.google_api_key:
-            return (f"{STATUS_WARN} Chưa có API Key Gemini. Lấy miễn phí "
-                    "tại aistudio.google.com/apikey rồi dán vào ô ở trên.")
-        model = settings.gemini_translate_model or "gemini-2.5-flash"
-        ok, message = check_model(settings.google_api_key, model)
-        return f"{STATUS_OK if ok else STATUS_WARN} {message}"
+        if not is_configured():
+            return (f"{STATUS_OK} Đang chạy thuần trên máy — không cần máy "
+                    "chủ. Bước dịch làm tay theo hướng dẫn hiện trong app.")
+        client = get_client()
+        try:
+            device = client.ensure_session()
+        except SaasError as e:
+            return f"{STATUS_WARN} {e}"
+        if not device.get("creditEnabled", True):
+            return f"{STATUS_OK} Máy chủ trả lời bình thường. Đang miễn phí."
+        return (f"{STATUS_OK} Máy chủ trả lời bình thường. "
+                f"Ví còn {int(device.get('balance', 0)):,} Vox.")
 
 
 class MaintenancePanel(CollapsibleSection):
@@ -502,11 +455,14 @@ class MaintenancePanel(CollapsibleSection):
             output_dir = self._settings_provider().output_dir
         except Exception:  # noqa: BLE001 — cấu hình hỏng thì bỏ qua
             return 0
-        targets = {THUMB_FILE, "waveform_peaks.json", INDEX_FILE}
+        targets = {THUMB_FILE, INDEX_FILE}
         removed = 0
         for root, _dirs, files in os.walk(output_dir):
             for name in files:
-                if name in targets:
+                # waveform_peaks*.json: đệm dạng sóng, gồm cả các track phụ
+                if (name in targets
+                        or (name.startswith("waveform_peaks")
+                            and name.endswith(".json"))):
                     try:
                         os.remove(os.path.join(root, name))
                         removed += 1
@@ -546,7 +502,7 @@ class MaintenancePanel(CollapsibleSection):
             ready = {
                 "Giọng đọc VieNeu": settings.vieneu_configured(),
                 "Nhận dạng Paraformer": settings.paraformer_configured(),
-                "Dịch tự động": settings.translate_configured(),
+                "Dịch tự động": settings.translate_enabled,
             }
             voice_count = len(catalog(settings))
             output_dir = settings.output_dir
