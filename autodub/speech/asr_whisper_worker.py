@@ -25,6 +25,8 @@ import json
 import os
 import sys
 
+_DLL_DIRECTORY_HANDLES = []
+
 
 def _die(proto_out, msg: str) -> None:
     print(json.dumps({"error": msg}, ensure_ascii=False),
@@ -46,7 +48,9 @@ def _try_load_cuda_dlls(dll_dir: str) -> bool:
     import glob
 
     try:
-        os.add_dll_directory(dll_dir)
+        # Keep the handle alive; destroying it removes the directory from
+        # Windows DLL resolution before CTranslate2 loads cuDNN.
+        _DLL_DIRECTORY_HANDLES.append(os.add_dll_directory(dll_dir))
         matches = glob.glob(os.path.join(dll_dir, "cublas64_*.dll"))
         if matches:
             ctypes.CDLL(matches[0])

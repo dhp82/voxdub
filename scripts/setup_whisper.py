@@ -46,6 +46,14 @@ if not os.path.isfile(WORKER):
 def log(msg: str) -> None:
     print(f"[setup-whisper] {msg}", flush=True)
 
+def _cuda_dll_dir() -> str:
+    """Return the CUDA DLL directory installed by the optional GPU venv."""
+    if os.name != "nt":
+        return ""
+    lib_dir = os.path.join(PROJECT_ROOT, ".venv-gpu", "Lib",
+                           "site-packages", "torch", "lib")
+    return lib_dir if os.path.isdir(lib_dir) else ""
+
 
 def step_venv() -> None:
     if os.path.isfile(VENV_PY):
@@ -86,13 +94,18 @@ def step_smoke() -> None:
 
     log("chạy smoke test (tải model lần đầu có thể mất vài phút) ...")
     try:
+        cmd = [VENV_PY, WORKER,
+               "--audio",     smoke_wav,
+               "--model",     "medium",
+               "--language",  "zh",
+               "--model-dir", MODEL_DIR]
+        cuda_dll_dir = _cuda_dll_dir()
+        if cuda_dll_dir:
+            cmd += ["--cuda-dll-dir", cuda_dll_dir]
+        request = {"audio": smoke_wav, "language": "zh", "beam_size": 1}
         proc = subprocess.run(
-            [VENV_PY, WORKER,
-             "--audio",     smoke_wav,
-             "--model",     "medium",      # model nhỏ cho smoke test nhanh
-             "--language",  "zh",
-             "--model-dir", MODEL_DIR],
-            input="",        # stdin rỗng — worker dùng arg --audio trực tiếp
+            cmd,
+            input=json.dumps(request) + "\n",
             capture_output=True,
             encoding="utf-8",
             errors="replace",

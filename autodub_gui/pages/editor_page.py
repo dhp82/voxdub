@@ -405,28 +405,42 @@ class EditorPage(VoiceAndExportMixin, BasePage):
             self.timeline.set_duration(self._project.duration_s)
 
     def _start_thumb_worker(self, video_path: str, duration_s: float) -> None:
-        """Khởi động worker grab thumbnail nền; hủy lần trước nếu còn chạy."""
+        """Start background thumbnail extraction, cancelling the previous run."""
         from autodub_gui.workers import TimelineThumbnailWorker
 
-        if self._thumb_worker is not None:
-            try:
-                self._thumb_worker.ready.disconnect()
-            except RuntimeError:
-                pass
-            # quit() vô nghĩa với QThread ghi đè run() (không có event loop) —
-            # thread cũ vẫn chạy ffmpeg và có thể bắn tín hiệu cũ về sau.
-            # cancel() + wait() mới thật sự dừng nó.
-            self._thumb_worker.cancel()
-            self._thumb_worker.wait(2000)
-            self._thumb_worker = None
+        self._stop_thumb_worker()
         if not video_path or duration_s <= 0:
             return
         worker = TimelineThumbnailWorker(
             video_path, duration_s, self._work_dir, parent=self)
         worker.ready.connect(self.timeline.set_thumbnails)
-        worker.finished.connect(worker.deleteLater)
+        worker.finished.connect(lambda w=worker: self._thumb_worker_finished(w))
         self._thumb_worker = worker
         worker.start()
+
+    def _thumb_worker_finished(self, worker) -> None:
+        """Drop the wrapper before deleteLater invalidates its C++ object."""
+        if self._thumb_worker is worker:
+            self._thumb_worker = None
+        worker.deleteLater()
+
+    def _stop_thumb_worker(self) -> None:
+        """Cancel the thumbnail thread, tolerating an already deleted Qt object."""
+        worker = self._thumb_worker
+        self._thumb_worker = None
+        if worker is None:
+            return
+        try:
+            worker.ready.disconnect()
+        except (RuntimeError, TypeError):
+            pass
+        try:
+            # quit() is ineffective because this QThread overrides run().
+            worker.cancel()
+            worker.wait(2000)
+        except RuntimeError:
+            # deleteLater may already have destroyed the underlying C++ object.
+            pass
 
     def _sync_overlay(self, opened_path: str) -> None:
         """Một video chỉ được có MỘT lớp phụ đề.
@@ -910,9 +924,7 @@ class EditorPage(VoiceAndExportMixin, BasePage):
                 worker.cancel()
                 worker.wait(5000)
         # Worker thumbnail chỉ chạy ffmpeg ngắn — hủy rồi chờ nhanh.
-        if self._thumb_worker is not None and self._thumb_worker.isRunning():
-            self._thumb_worker.cancel()
-            self._thumb_worker.wait(2000)
+        self._stop_thumb_worker()
 
     def cleanup(self) -> None:
         # app.quit() có thể bỏ qua closeEvent → shutdown() chưa chắc đã chạy.

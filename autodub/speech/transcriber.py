@@ -13,6 +13,7 @@ from autodub.utils import bundled_file, gpu_venv_dir, save_json_atomic, setup_lo
 logger = setup_logging("autodub.transcriber")
 
 _WHISPER_WORKER_SCRIPT = bundled_file("autodub", "speech", "asr_whisper_worker.py")
+_CUDA_DLL_DIRECTORY_HANDLES = []
 
 
 def _enable_cuda_dlls() -> bool:
@@ -37,7 +38,8 @@ def _enable_cuda_dlls() -> bool:
     if not matches:
         return False
     try:
-        os.add_dll_directory(lib_dir)
+        # Keep the handle alive for later lazy loads of cuDNN by CTranslate2.
+        _CUDA_DLL_DIRECTORY_HANDLES.append(os.add_dll_directory(lib_dir))
         ctypes.CDLL(matches[0])
         return True
     except OSError:

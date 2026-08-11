@@ -52,3 +52,19 @@ def test_whisper_with_cuda_means_gpu():
     with mock.patch.object(transcriber, "_enable_cuda_dlls",
                            return_value=True):
         assert transcriber.asr_will_use_gpu(s, "en") is True
+
+
+def test_enable_cuda_dlls_keeps_directory_handle(monkeypatch, tmp_path):
+    lib_dir = tmp_path / "Lib" / "site-packages" / "torch" / "lib"
+    lib_dir.mkdir(parents=True)
+    dll = lib_dir / "cublas64_12.dll"
+    dll.write_bytes(b"")
+    handle = object()
+
+    transcriber._CUDA_DLL_DIRECTORY_HANDLES.clear()
+    monkeypatch.setattr(transcriber, "gpu_venv_dir", lambda: str(tmp_path))
+    with mock.patch("os.add_dll_directory", return_value=handle), \
+         mock.patch("ctypes.CDLL"):
+        assert transcriber._enable_cuda_dlls() is True
+
+    assert transcriber._CUDA_DLL_DIRECTORY_HANDLES == [handle]
