@@ -141,6 +141,7 @@ class ToolPage(BasePage):
             spec.FOLDER: self._build_folder,
             spec.FILE: self._build_file,
             spec.COLOR: self._build_color,
+            spec.PASSWORD: self._build_password,
         }
         return builders.get(item.kind, self._build_text)(item)
 
@@ -180,6 +181,11 @@ class ToolPage(BasePage):
 
     def _build_text(self, item: spec.Field) -> QWidget:
         widget = LabeledLineEdit(item.label, item.placeholder, item.hint)
+        widget.changed.connect(self._mark_dirty)
+        return widget
+
+    def _build_password(self, item: spec.Field) -> QWidget:
+        widget = LabeledLineEdit(item.label, item.placeholder, item.hint, password=True)
         widget.changed.connect(self._mark_dirty)
         return widget
 

@@ -74,3 +74,30 @@ def available_ram_gb() -> float | None:
     if status is None:
         return None
     return status[1] / _BYTES_PER_GB
+
+from pathlib import Path
+
+
+def cuda_status() -> dict:
+    """Probe the actual CUDA runtime in the GPU venv, never just its folder."""
+    import json
+    import subprocess
+    from autodub.utils import gpu_venv_dir
+
+    venv = gpu_venv_dir()
+    exe = Path(venv) / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+    if not exe.is_file():
+        return {"available": False, "device": "CPU", "reason": "GPU environment is not installed"}
+    code = ("import json,torch; print(json.dumps({"
+            "'available':bool(torch.cuda.is_available()),"
+            "'device':torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'CPU',"
+            "'cuda':str(torch.version.cuda or '')}))")
+    try:
+        result = subprocess.run([str(exe), "-c", code], capture_output=True,
+                                text=True, timeout=20,
+                                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        if result.returncode == 0:
+            return json.loads(result.stdout.strip().splitlines()[-1])
+        return {"available": False, "device": "CPU", "reason": result.stderr[-200:]}
+    except Exception as exc:
+        return {"available": False, "device": "CPU", "reason": str(exc)}

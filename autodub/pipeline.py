@@ -203,15 +203,20 @@ class DubPipeline:
         avail = available_ram_gb()
         ram_txt = (f"RAM {avail:.1f}/{total:.1f} GB trống"
                    if total is not None and avail is not None else "RAM ?")
-        gpu_txt = "có" if gpu_venv_python() else "không"
+
+        from autodub.sysinfo import cuda_status
+        gpu = cuda_status()
+        logger.info(f"Machine: {os.cpu_count() or '?'} cores; {ram_txt}")
         logger.info(
-            f"Máy: {os.cpu_count() or '?'} nhân, {ram_txt}, GPU (venv) {gpu_txt} — "
-            f"TTS {settings.vieneu_max_workers} luồng, "
-            f"parallel {settings.parallel_workers}")
-        # Xuất video bằng card đồ họa nhanh gấp nhiều lần CPU. Ghi rõ ở đây để
-        # người dùng máy yếu biết ngay mình đang chạy đường nào.
+            f"CUDA runtime: {'available' if gpu.get('available') else 'unavailable'}; "
+            f"device={gpu.get('device', 'CPU')}; cuda={gpu.get('cuda', '')}")
+        logger.info(f"Workers: TTS={settings.vieneu_max_workers}; "
+                    f"translation={settings.parallel_workers}")
+
+        # Actual encoder is probed with a real one-frame encode.
         try:
-            logger.info(f"Xuất video bằng: {video_encoder_name()}")
+            encoder = video_encoder_name()
+            logger.info(f"Video Encoder: {encoder}")
         except Exception as exc:      # ffmpeg lạ — không đáng làm hỏng lượt chạy
             logger.debug(f"Không dò được encoder: {exc}")
 
@@ -998,6 +1003,9 @@ class DubPipeline:
         from autodub.text.translate_saas import run_id_for
 
         HOLD.clear()
+        # Direct providers do not use VoxDub credits or holds.
+        if self.settings.translate_provider != "voxdub":
+            return None
         if not is_configured():
             # Chạy thuần trên máy — không có ví Vox nào để giữ chỗ.
             return None
@@ -1134,8 +1142,9 @@ class DubPipeline:
         if not settings.translate_enabled:
             return None
 
+        provider = settings.translate_provider.lower()
         from autodub.saas_client import is_configured
-        if not is_configured():
+        if provider == "voxdub" and not is_configured():
             # Chạy thuần trên máy: không có máy chủ dịch nào được cấu hình.
             # Trả None để pipeline rẽ sang dịch tay (TRANSLATE_PENDING.txt).
             logger.info("Chưa cấu hình máy chủ dịch — chuyển sang dịch tay")
@@ -1145,14 +1154,31 @@ class DubPipeline:
             DeviceBlockedError, InsufficientCreditError, MaintenanceError,
             OfflineError, SaasError)
         from autodub.text.translate_common import USAGE
-        from autodub.text.translate_saas import (
-            analyze_transcript, apply_analysis, run_id_for, translate_segments)
+
+        # Import translation modules based on provider
+        if provider == "gemini":
+            from autodub.text.translate_gemini import translate_segments
+            logger.info("Using Gemini for translation")
+        elif provider == "openrouter":
+            from autodub.text.translate_openrouter import translate_segments
+            logger.info("Using OpenRouter for translation")
+        elif provider == "deepseek":
+            from autodub.text.translate_deepseek import translate_segments
+            logger.info("Using DeepSeek for translation")
+        else:  # voxdub (default)
+            from autodub.text.translate_saas import (
+                analyze_transcript, apply_analysis, run_id_for, translate_segments)
+            logger.info("Using VoxDub Cloud for translation")
 
         from autodub.media.audio import FALLBACKS
 
         USAGE.reset()      # đếm Vox của riêng video này, từ phân tích trở đi
         FALLBACKS.reset()  # các câu phải dùng bản dự phòng, cũng của riêng nó
-        run_id = run_id_for(segments, target)
+
+        # run_id only needed for VoxDub backend
+        if provider == "voxdub":
+            from autodub.text.translate_saas import run_id_for
+            run_id = run_id_for(segments, target)
 
         # Tiêu đề gốc (downloader lưu lúc tải) — ngữ cảnh miễn phí cho cả
         # lượt phân tích lẫn prompt của mọi lô dịch.
@@ -1161,19 +1187,23 @@ class DubPipeline:
             from autodub.workdir import load_video_meta
             title = str(load_video_meta(work_dir).get("title", "")).strip()
 
-        rep.emit("translate", "start", detail="VoxDub Cloud")
+        rep.emit("translate", "start", detail=f"{provider.upper()}")
         logger.info(f"Đang dịch {len(segments)} câu sang tiếng Việt...")
 
         try:
             # Lượt 0 — kết quả lưu trong thư mục dự án nên chạy tiếp không
             # tốn thêm Vox. Bản cấu hình hiệu dụng chỉ sống trong lượt này.
             effective = settings
-            if settings.translate_analysis:
+
+            # Analysis pass only supported by VoxDub backend
+            if provider == "voxdub" and settings.translate_analysis:
+                from autodub.text.translate_saas import analyze_transcript, apply_analysis
                 cache = data_path(work_dir, "video_context.json") if work_dir else None
                 analysis = analyze_transcript(segments, source_lang,
                                               video_title=title,
                                               cache_path=cache)
                 effective = apply_analysis(settings, analysis)
+
             if title and not effective.translate_video_title:
                 import dataclasses
                 effective = dataclasses.replace(effective,
@@ -1201,21 +1231,28 @@ class DubPipeline:
             logger.warning(f"Dịch tự động lỗi ({e}) — chuyển sang dịch tay")
             rep.emit("translate", "error", detail=str(e))
             return None
-        except Exception as e:      # lỗi lạ: vẫn còn đường dịch tay
-            logger.warning(f"Dịch tự động lỗi ({e}) — chuyển sang dịch tay")
+        except Exception as e:
             rep.emit("translate", "error", detail=str(e))
+            if provider != "voxdub":
+                raise RuntimeError(
+                    f"Translation provider {provider} failed: {e}. "
+                    "Check the API key, Base URL and model in Translation settings."
+                ) from e
+            logger.warning(f"Automatic translation failed ({e}); switching to manual translation")
             return None
 
         # Lượt rà soát — soát câu tràn khung / lẫn chữ Hán / sót ý rồi dịch
         # lại đúng các câu đó. Hỏng thì giữ nguyên bản lượt đầu.
-        try:
-            from autodub.text.translate_review import review_translations
-            result = review_translations(result, target, source_lang,
-                                         effective, run_id=run_id)
-        except PipelineCancelled:
-            raise
-        except Exception as e:
-            logger.warning(f"Rà soát bản dịch lỗi ({e}) — dùng bản lượt đầu")
+        # Review pass only supported by VoxDub backend
+        if provider == "voxdub" and settings.translate_review:
+            try:
+                from autodub.text.translate_review import review_translations
+                result = review_translations(result, target, source_lang,
+                                             effective, run_id=run_id)
+            except PipelineCancelled:
+                raise
+            except Exception as e:
+                logger.warning(f"Rà soát bản dịch lỗi ({e}) — dùng bản lượt đầu")
 
         usage = _usage_snapshot()
         if usage["vox"]:

@@ -145,6 +145,12 @@ def main() -> None:
         if language == "auto":
             language = None
 
+    # CRITICAL: User MUST provide language. No auto-detection allowed.
+    if not language:
+        _die(proto_out, "Language must be explicitly specified by user. "
+             "Automatic language detection is disabled. "
+             "Please select the video's language in the UI.")
+
     try:
         raw_segments, info = model.transcribe(
             audio_path,
@@ -157,11 +163,8 @@ def main() -> None:
     except Exception as e:
         _die(proto_out, f"Lỗi khi nhận dạng: {e}")
 
-    detected_lang = getattr(info, "language", "") or ""
-    detected_prob = getattr(info, "language_probability", 0.0)
-    if not language and detected_lang:
-        print(f"Ngôn ngữ tự nhận: {detected_lang} ({detected_prob:.0%})",
-              flush=True)
+    # Log the language used for transcription (for verification)
+    print(f"Transcribed using language: {language}", flush=True)
 
     seg_id = 0
     for seg in raw_segments:
@@ -184,11 +187,15 @@ def main() -> None:
         }
         print(json.dumps(out, ensure_ascii=False), file=proto_out, flush=True)
 
+    detected_lang = getattr(info, "language", language) or language
+    detected_prob = float(getattr(info, "language_probability", 0.0) or 0.0)
     print(json.dumps({
-        "done":         True,
+        "done": True,
         "num_segments": seg_id,
-        "language":     detected_lang,
+        "language": detected_lang,
         "language_prob": round(detected_prob, 3),
+        "device": "cuda" if cuda_ok else "cpu",
+        "model": model_name,
     }), file=proto_out, flush=True)
 
 

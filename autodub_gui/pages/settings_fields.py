@@ -32,6 +32,7 @@ SETTINGS_TABS = (TAB_BASIC, TAB_PERF, TAB_ADVANCED)
 # Kiểu ô nhập
 COMBO = "combo"
 TEXT = "text"
+PASSWORD = "password"
 CHECK = "check"
 SLIDER = "slider"
 NUMBER = "number"
@@ -270,24 +271,25 @@ FIELDS: tuple[Field, ...] = (
           "đĩa, nhưng dự án đó sẽ không sửa từng câu hay xuất lại được nữa."),
 
     # -- Thẻ Dịch thuật ------------------------------------------------
-    # Mô hình, lời nhắc và API Key nằm trên máy chủ VoxDub. Người dùng không
-    # chọn nơi dịch nữa — thứ họ đóng góp được là NGỮ CẢNH: video nói về gì,
-    # xưng hô ra sao, thuật ngữ nào phải dịch cố định. Máy chủ tự phân tích
-    # được phần lớn, nhưng người làm kênh biết rõ hơn máy.
-    Field("TRANSLATE_ENABLED", CHECK, "Bật dịch tự động", TAB_TRANSLATE,
-          "Dịch tự động", "true",
-          "Bật: máy chủ dịch toàn bộ, 12 Vox mỗi câu thoại. Tắt: ứng dụng "
-          "dừng ở bước dịch và hướng dẫn bạn dịch tay, còn 10 Vox mỗi câu."),
-    Field("TRANSLATE_BATCH_SIZE", NUMBER, "Số câu mỗi lượt gửi", TAB_TRANSLATE,
-          "Dịch tự động", "40",
-          "Lô nhỏ hơn thì chậm hơn một chút nhưng mạch dịch bám ngữ cảnh sát "
-          "hơn. Không ảnh hưởng số Vox — tính theo câu, không theo lượt gửi.",
-          minimum=1, maximum=100, step=5, decimals=0),
+    # Translation providers (Vietnamese labels are kept ASCII-safe in source)
+    Field("TRANSLATE_PROVIDER", COMBO, "Nha cung cap dich", TAB_TRANSLATE, "Nha cung cap", "voxdub", "Chon dich vu thuc su duoc pipeline su dung. C\u1ea5u h\u00ecnh r\u00f5 r\u00e0ng.", options=[("VoxDub Cloud", "voxdub"), ("Google Gemini", "gemini"), ("OpenRouter", "openrouter"), ("DeepSeek", "deepseek")]),
+    Field("VOXDUB_API_URL", TEXT, "VoxDub Base URL", TAB_TRANSLATE, "VoxDub Cloud", "", "Dia chi may chu VoxDub; de trong neu khong dung. C\u00f3 th\u1ec3 t\u00f9y ch\u1ec9nh."),
+    Field("GEMINI_API_KEY", PASSWORD, "Gemini API Key", TAB_TRANSLATE, "Google Gemini", "", "Khoa duoc che va khong ghi vao log. B\u1ea3o m\u1eadt th\u00f4ng tin."),
+    Field("GEMINI_BASE_URL", TEXT, "Gemini Base URL", TAB_TRANSLATE, "Google Gemini", "https://generativelanguage.googleapis.com/v1beta", "Gemini endpoint hoac gateway tuong thich. C\u00f3 th\u1ec3 t\u00f9y ch\u1ec9nh."),
+    Field("GEMINI_MODEL", TEXT, "Gemini model", TAB_TRANSLATE, "Google Gemini", "gemini-2.0-flash", "Nhap tuy y ten model. Kh\u00f4ng kh\u00f3a c\u1ee9ng."),
+    Field("OPENROUTER_API_KEY", PASSWORD, "OpenRouter API Key", TAB_TRANSLATE, "OpenRouter", "", "Khoa duoc che va khong ghi vao log. B\u1ea3o m\u1eadt th\u00f4ng tin."),
+    Field("OPENROUTER_BASE_URL", TEXT, "OpenRouter Base URL", TAB_TRANSLATE, "OpenRouter", "https://openrouter.ai/api/v1", "OpenRouter OpenAI-compatible endpoint. C\u00f3 th\u1ec3 t\u00f9y ch\u1ec9nh."),
+    Field("OPENROUTER_MODEL", TEXT, "OpenRouter model", TAB_TRANSLATE, "OpenRouter", "google/gemini-2.0-flash-001", "Nhap tuy y ID model. Kh\u00f4ng kh\u00f3a c\u1ee9ng."),
+    Field("DEEPSEEK_API_KEY", PASSWORD, "DeepSeek API Key", TAB_TRANSLATE, "DeepSeek", "", "Khoa duoc che va khong ghi vao log. B\u1ea3o m\u1eadt th\u00f4ng tin."),
+    Field("DEEPSEEK_BASE_URL", TEXT, "DeepSeek Base URL", TAB_TRANSLATE, "DeepSeek", "https://api.deepseek.com", "Official or compatible endpoint. C\u00f3 th\u1ec3 t\u00f9y ch\u1ec9nh."),
+    Field("DEEPSEEK_MODEL", TEXT, "DeepSeek model", TAB_TRANSLATE, "DeepSeek", "deepseek-chat", "Nhap tuy y ten model. Kh\u00f4ng kh\u00f3a c\u1ee9ng."),
+    Field("TRANSLATE_TEMPERATURE", NUMBER, "Temperature", TAB_TRANSLATE, "Tham so chung", "0.3", "Creativity level; zero is deterministic. Gi\u00e1 tr\u1ecb \u0111\u01b0\u1ee3c ki\u1ec3m tra.", minimum=0, maximum=2, step=0.1, decimals=1),
+    Field("TRANSLATE_ENABLED", CHECK, "Bat dich tu dong", TAB_TRANSLATE, "Tham so chung", "true", "Disable to use the guided manual flow. C\u00f3 h\u01b0\u1edbng d\u1eabn r\u00f5 r\u00e0ng."),
+    Field("TRANSLATE_BATCH_SIZE", NUMBER, "So cau moi request", TAB_TRANSLATE, "Tham so chung", "40", "Smaller batches reduce truncated responses. C\u00f3 gi\u1edbi h\u1ea1n an to\u00e0n.", minimum=1, maximum=100, step=5, decimals=0),
 
     Field("TRANSLATE_DOMAIN", TEXT, "Chủ đề video", TAB_TRANSLATE,
           "Ngữ cảnh video", "",
-          "Càng cụ thể thì bản dịch càng đúng ngữ cảnh. Để trống thì máy chủ "
-          "tự đoán từ lời thoại.",
+          "Càng cụ thể thì bản dịch càng đúng ngữ cảnh.",
           placeholder="ví dụ: review công nghệ, phim cổ trang, vlog ẩm thực"),
     Field("TRANSLATE_CONTEXT", MULTILINE, "Ngữ cảnh", TAB_TRANSLATE,
           "Ngữ cảnh video", "",
@@ -327,9 +329,6 @@ EXEMPT_KEYS: dict[str, str] = {
                    "không cần đổi; ai cần thì sửa thẳng trong .env",
     "SUPPORT_URL": "đường dẫn biểu mẫu báo lỗi cố định, chỉ hiện ở nút Gửi "
                    "báo lỗi chứ không phải cấu hình của người dùng",
-    "VOXDUB_API_URL": "địa chỉ máy chủ được nhúng cứng vào bản đóng gói; "
-                      "chỉ đọc từ .env khi chạy từ mã nguồn (dev), người "
-                      "dùng cuối không đổi được và không cần đổi",
 }
 
 

@@ -1,365 +1,488 @@
 # VoxDub Studio
 
-**Lồng tiếng Việt cho video nước ngoài — tự động, chạy trên máy bạn, miễn phí.**
+**Hệ thống dịch và lồng tiếng video tự động hoàn toàn** — dịch video từ tiếng Trung/Anh/Nhật/Hàn sang tiếng Việt bằng AI nhận dạng giọng nói, dịch thuật và tổng hợp giọng đọc.
 
-Ứng dụng desktop cho Windows. Dán link YouTube / TikTok / Douyin / Bilibili (hoặc chọn file trên máy), chọn giọng đọc, bấm chạy — nhận về video đã lồng tiếng Việt, **giữ nguyên nhạc nền và hiệu ứng âm thanh gốc**, kèm phụ đề và trình chỉnh sửa từng câu.
+## Tính năng
 
-Nghe-chép, lồng tiếng, phụ đề, xuất video đều **chạy offline trên máy bạn**, không cần API key, không gửi video đi đâu.
+- **Nhận dạng giọng nói đa ngôn ngữ**: Whisper (mọi ngôn ngữ) hoặc Paraformer (tiếng Trung, độ chính xác cao hơn)
+- **Tăng tốc GPU**: Xử lý nhanh hơn 10 lần với NVIDIA CUDA
+- **Dịch thuật linh hoạt**: Chọn giữa VoxDub Cloud, Google Gemini, hoặc OpenRouter
+- **Giọng đọc tiếng Việt chất lượng cao**: Công nghệ tổng hợp giọng VieNeu
+- **Căn thời gian thông minh**: Tự động điều chỉnh thời điểm lời thoại với nén mềm và phát hiện khoảng lặng
+- **Phụ đề karaoke**: Tô sáng từng chữ theo thời gian với hiệu ứng bật lên/mờ dần
+- **Nhạc nền**: Tách giọng nói thông minh với Demucs
+- **Giao diện web**: Quản lý dự án dễ dàng với giao diện Streamlit
 
-```
-Link / File video
-   ├─► Tải về  ──►  Tách âm thanh  ──►  Tách nhạc nền (Demucs)
-   │                       │
-   │                       └──►  Nghe-chép lời gốc (Whisper / Paraformer)
-   │                                     │
-   │                                     └──►  Dịch sang tiếng Việt
-   │                                                  │
-   │                                                  └──►  Đọc thành giọng Việt (VieNeu)
-   │                                                              │
-   └───────────────────────────────────────────►  Khớp thời gian  ┘
-                                                        │
-                                    Trộn nhạc nền + phụ đề + che chữ gốc
-                                                        │
-                                                  dubbed_video.mp4
-```
+## Cài đặt nhanh
 
----
+### 1. Yêu cầu hệ thống
 
-## Mục lục
+- **Python 3.10 trở lên** - Tải tại https://www.python.org/downloads/
+  - ✅ Nhớ tích "Add Python to PATH" khi cài đặt
+- **ffmpeg** - Tải tại https://www.gyan.dev/ffmpeg/builds/
+  - Giải nén và thêm thư mục `bin` vào biến môi trường PATH của Windows
+- **Windows 10/11**
+- **Tùy chọn**: Card đồ họa NVIDIA với CUDA (tăng tốc 3-10 lần)
 
-1. [Cài đặt trong 5 phút](#1-cài-đặt-trong-5-phút)
-2. [Chạy video đầu tiên](#2-chạy-video-đầu-tiên)
-3. [Bước dịch — hai cách](#3-bước-dịch--hai-cách)
-4. [Hướng dẫn từng trang](#4-hướng-dẫn-từng-trang)
-5. [Kết quả nằm ở đâu](#5-kết-quả-nằm-ở-đâu)
-6. [Cài thêm (không bắt buộc)](#6-cài-thêm-không-bắt-buộc)
-7. [Câu hỏi thường gặp](#7-câu-hỏi-thường-gặp)
-8. [Dành cho lập trình viên](#8-dành-cho-lập-trình-viên)
-9. [Ủng hộ tác giả](#9-ủng-hộ-tác-giả)
-
----
-
-## 1. Cài đặt trong 5 phút
-
-### Bạn cần chuẩn bị 2 thứ
-
-| Cần gì | Tải ở đâu | Lưu ý |
-|---|---|---|
-| **Python 3.10 trở lên** | <https://www.python.org/downloads/> | Khi cài **NHỚ TÍCH ô "Add Python to PATH"** — quên bước này là mọi thứ sau đó không chạy |
-| **ffmpeg (bản full)** | <https://www.gyan.dev/ffmpeg/builds/> — file `ffmpeg-release-full.7z` | Giải nén ra ví dụ `C:\ffmpeg`, rồi thêm `C:\ffmpeg\bin` vào **PATH** của Windows |
-
-<details>
-<summary><b>Cách thêm ffmpeg vào PATH (bấm để xem)</b></summary>
-
-1. Giải nén file `.7z` vừa tải (dùng [7-Zip](https://www.7-zip.org/) nếu Windows không mở được)
-2. Đổi tên thư mục vừa giải nén thành `ffmpeg`, chép vào ổ `C:\` → được `C:\ffmpeg\bin\ffmpeg.exe`
-3. Bấm phím Windows, gõ **"environment variables"** → mở **"Edit the system environment variables"**
-4. Bấm **Environment Variables…** → ở khung dưới chọn dòng **Path** → **Edit** → **New** → dán `C:\ffmpeg\bin` → **OK** hết
-5. **Mở lại** Command Prompt, gõ `ffmpeg -version`. Hiện ra một đống chữ = xong.
-
-</details>
-
-### Rồi chạy 1 file
-
-Tải mã nguồn về (bấm **Code → Download ZIP** ở trang GitHub, hoặc `git clone`), giải nén, rồi:
-
-> **Đúp chuột vào `cai_dat.bat`**
-
-File này tự làm hết:
-
-| Bước | Nội dung |
-|---|---|
-| 1 | Kiểm tra Python |
-| 2 | Kiểm tra ffmpeg |
-| 3 | Cài thư viện Python (`requirements.txt`) |
-| 4 | Tạo file cấu hình `.env` |
-| 5 | Cài bộ nghe-chép **Whisper** và bộ giọng đọc **VieNeu** |
-
-Lần đầu tải về khoảng **1–2 GB** (model AI) nên hơi lâu. **Chạy lại `cai_dat.bat` lúc nào cũng an toàn** — phần nào đã xong sẽ được bỏ qua, không tải lại.
-
-### Mở ứng dụng
-
-> **Đúp chuột vào `chay_app.bat`**
-
-<details>
-<summary><b>Nếu bạn thích gõ lệnh hơn</b></summary>
+### 2. Cài đặt ứng dụng
 
 ```bash
+# Tải mã nguồn về
+git clone https://github.com/ttthanh2044/voxdub.git
+cd voxdub
+
+# Chạy script cài đặt tự động
+setup.bat
+```
+
+Script `setup.bat` sẽ tự động:
+- Kiểm tra Python 3.10+ đã cài
+- Kiểm tra ffmpeg có trong PATH
+- Cài đặt các thư viện cần thiết
+- Tạo file cấu hình `.env` từ mẫu `.env.example`
+- Cài đặt Whisper ASR (nhận dạng giọng nói)
+- Cài đặt VieNeu TTS (tổng hợp giọng tiếng Việt)
+- Hỏi có muốn cài thêm hỗ trợ GPU không
+
+**An toàn chạy lại**: Script có thể chạy nhiều lần, sẽ tự động bỏ qua các bước đã hoàn thành.
+
+### 3. Cấu hình lần đầu
+
+```bash
+first_run_wizard.bat
+```
+
+Trình hướng dẫn tương tác sẽ giúp bạn:
+1. **Chọn nhà cung cấp dịch thuật**:
+   - **VoxDub Cloud**: Chất lượng tốt nhất (cần triển khai máy chủ backend riêng)
+   - **Google Gemini Direct**: Miễn phí 15 lượt/phút, chất lượng tốt, dễ setup
+   - **OpenRouter**: Truy cập nhiều mô hình AI, trả theo lượng dùng
+2. **Nhập API key** cho dịch vụ bạn chọn
+3. **Chọn engine nhận dạng giọng nói**: Whisper (đa ngôn ngữ) hoặc Paraformer (chỉ tiếng Trung, chính xác hơn)
+4. **Chọn mức chất lượng**: Nhanh / Cân bằng / Chất lượng cao
+
+### 4. Tăng tốc GPU (Tùy chọn nhưng rất khuyên dùng)
+
+Nếu máy bạn có card NVIDIA:
+
+```bash
+cai_them_gpu.bat
+```
+
+Script sẽ:
+- Tạo môi trường ảo `.venv-gpu`
+- Cài PyTorch với CUDA 12.4
+- Cài Demucs để tách giọng nói (dùng GPU)
+- Kiểm tra GPU có hoạt động không
+
+**Hiệu suất**: GPU giúp xử lý nhanh hơn **3-10 lần** so với CPU thuần.
+
+### 5. Chạy ứng dụng
+
+```bash
+chay_app.bat
+```
+
+Ứng dụng sẽ mở tại `http://localhost:8501`
+
+## Hướng dẫn sử dụng
+
+### Quy trình cơ bản
+
+1. **Tạo dự án mới**
+   - Nhập URL video YouTube hoặc upload file video từ máy
+   - Chọn ngôn ngữ gốc (tiếng Trung, Anh, Nhật, Hàn)
+   - Chọn giọng đọc tiếng Việt
+   - Chọn mức chất lượng
+
+2. **Xử lý tự động**
+
+   Pipeline sẽ tự động thực hiện các bước:
+   - ✅ Tải video và tách âm thanh
+   - ✅ Tách giọng nói khỏi nhạc nền (Demucs)
+   - ✅ Nhận dạng lời thoại bằng ASR (Whisper/Paraformer)
+   - ✅ Dịch sang tiếng Việt (Gemini/OpenRouter/VoxDub)
+   - ✅ Tổng hợp giọng đọc tiếng Việt (VieNeu)
+   - ✅ Căn chỉnh thời gian và trộn âm thanh
+   - ✅ Xuất video hoàn chỉnh
+
+3. **Xem lại và chỉnh sửa**
+   - Phát video kết quả
+   - Sửa bản dịch nếu cần (chỉnh từng câu)
+   - Điều chỉnh tốc độ giọng đọc, tốc độ video
+   - Tùy chỉnh phụ đề (vị trí, màu sắc, font chữ, hiệu ứng karaoke)
+
+4. **Xuất video cuối cùng**
+   - Tải về file video đã lồng tiếng
+   - File metadata cho YouTube/TikTok/Facebook (nếu bật)
+
+### Tính năng nâng cao
+
+#### Dịch thủ công
+Nếu muốn tự dịch hoặc dùng ChatGPT/Gemini:
+1. Tắt "Bật dịch tự động" trong Settings → Dịch thuật
+2. Khi chạy pipeline, ứng dụng sẽ dừng ở bước dịch
+3. Mở file `TRANSLATE_PENDING.txt` trong thư mục dự án
+4. Copy nội dung, dán vào ChatGPT/Gemini với prompt dịch của bạn
+5. Copy bản dịch về, paste vào ứng dụng
+6. Pipeline tự động tiếp tục các bước còn lại
+
+#### Phụ đề
+Ba chế độ phụ đề:
+- **Không phụ đề**: Chỉ lồng tiếng, không có chữ
+- **Phụ đề mềm**: File .srt riêng, bật/tắt được trong trình phát
+- **Phụ đề cháy**: Chữ nhúng cố định vào video
+
+**Các bộ kiểu có sẵn**:
+- `clean`: Chữ trắng viền đen đơn giản
+- `bold_yellow`: Chữ vàng đậm nổi bật
+- `box`: Nền mờ sau chữ (kiểu CapCut)
+- `tiktok`: Chữ to viền dày (dành cho video ngắn)
+- `karaoke`: Tô sáng từng chữ theo lời đọc
+- `cinema`: Kiểu phụ đề phim cổ điển
+- `custom`: Tự chỉnh từng thông số
+
+#### Hiệu ứng karaoke
+Khi chọn kiểu hiển thị "Hiện theo cụm chữ":
+- **Hiệu ứng bật lên**: Chữ phóng to khi được đọc
+- **Hiệu ứng mờ dần**: Chữ hiện dần từ mờ sang rõ
+- **Đổi màu theo lời đọc**: Chữ đổi màu khi được đọc (karaoke thật)
+- **Không hiệu ứng**: Chỉ hiện từng cụm, không có animation
+
+**Canh chữ theo lời đọc**: Bật để Whisper căn chỉnh chính xác thời điểm từng chữ (chạy thêm 30-60 giây nhưng rất chính xác).
+
+#### Thư viện giọng đọc
+Nhiều giọng nam/nữ khác nhau:
+- Giọng miền Bắc: Phạm Tuyên, Mai Phương, Thu Thảo
+- Giọng miền Nam: Anh Tuấn, Huyền Trang
+- Giọng trẻ: Minh Khánh, Lan Anh
+- Mỗi giọng có nhiều phong cách: Tự nhiên, Tin tức, Kể chuyện
+
+#### Điều chỉnh tốc độ
+- **Tốc độ video**: Làm chậm toàn bộ video (0.82 = dài thêm 22%) để giọng Việt có đủ chỗ
+- **Tốc độ giọng đọc**: Tăng tốc giọng đọc (1.2 = nhanh hơn 20%) khi câu Việt dài hơn câu gốc
+
+**Khuyến nghị**: Giữ tốc độ video = 1.0, chỉ tăng tốc giọng đọc nếu cần.
+
+## Cấu hình chi tiết
+
+### Nhà cung cấp dịch thuật
+
+#### 1. VoxDub Cloud (Khuyên dùng nếu có máy chủ)
+```env
+TRANSLATE_PROVIDER=voxdub
+VOXDUB_API_URL=http://your-backend-url:3001
+```
+
+**Ưu điểm**:
+- Prompt tối ưu với phân tích video tự động
+- Có lượt rà soát chất lượng (review pass)
+- Job ID không trùng lặp, tránh tính phí 2 lần khi thử lại
+- Quản lý API key tập trung ở server
+
+**Nhược điểm**: Cần triển khai backend riêng (không miễn phí)
+
+#### 2. Google Gemini Direct (Khuyên dùng cho cá nhân)
+```env
+TRANSLATE_PROVIDER=gemini
+GEMINI_API_KEY=your_api_key_here
+GEMINI_MODEL=gemini-2.0-flash-exp
+```
+
+**Lấy API key miễn phí**: https://aistudio.google.com/apikey
+
+**Giới hạn**:
+- Miễn phí: 15 lượt/phút
+- Trả phí: 1000 lượt/phút
+
+**Ưu điểm**:
+- Hoàn toàn miễn phí (đủ cho hầu hết nhu cầu cá nhân)
+- Không cần backend
+- Chất lượng dịch tốt
+- Setup đơn giản
+
+**Nhược điểm**: Không có lượt phân tích/rà soát như VoxDub
+
+#### 3. OpenRouter
+```env
+TRANSLATE_PROVIDER=openrouter
+OPENROUTER_API_KEY=your_api_key_here
+OPENROUTER_MODEL=google/gemini-2.0-flash-exp:free
+```
+
+**Lấy API key**: https://openrouter.ai/keys
+
+**Các model phổ biến**:
+- `google/gemini-2.0-flash-exp:free` - Miễn phí, khuyên dùng
+- `anthropic/claude-3.5-sonnet` - Trả phí, chất lượng rất cao
+- `openai/gpt-4` - Trả phí, chất lượng cao
+
+**Ưu điểm**:
+- Truy cập nhiều mô hình AI khác nhau
+- Linh hoạt về giá
+- Có model miễn phí
+
+### Engine nhận dạng giọng nói (ASR)
+
+#### Whisper (Đa ngôn ngữ)
+```env
+ASR_ENGINE=whisper
+WHISPER_MODEL=auto
+DEFAULT_SOURCE_LANG=zh-CN
+```
+
+**WHISPER_MODEL**:
+- `auto`: Tự chọn large-v3 nếu có GPU, medium nếu CPU (khuyên dùng)
+- `tiny`: Nhanh nhất, độ chính xác thấp nhất
+- `base`: Nhanh, độ chính xác thấp
+- `small`: Nhanh hơn, độ chính xác tốt
+- `medium`: Cân bằng
+- `large-v3`: Chính xác nhất, chậm nhất
+
+**Ngôn ngữ hỗ trợ**: Trung, Anh, Nhật, Hàn, và 90+ ngôn ngữ khác
+
+**Lưu ý**: Tự động nhận dạng ngôn ngữ đã bị vô hiệu hóa. Bạn PHẢI chọn ngôn ngữ gốc rõ ràng để đảm bảo độ chính xác.
+
+#### Paraformer (Chỉ tiếng Trung, độ chính xác cao hơn)
+```env
+ASR_ENGINE=paraformer
+DEFAULT_SOURCE_LANG=zh-CN
+```
+
+Cài đặt:
+```bash
+py scripts\setup_paraformer.py
+```
+
+**Ưu điểm**: Chính xác hơn Whisper với video tiếng Trung
+**Nhược điểm**:
+- Chỉ hỗ trợ tiếng Trung
+- Không có GPU, chỉ chạy trên CPU
+
+### Mức chất lượng (Presets)
+
+```env
+QUALITY_PRESET=balanced  # fast | balanced | quality
+```
+
+| Cài đặt | Nhanh | Cân bằng | Chất lượng cao |
+|---------|-------|----------|----------------|
+| Model Whisper | medium | auto | large-v3 |
+| Nhạc nền | 16kHz mono | 44.1kHz stereo | 44.1kHz stereo |
+| Số lượt dịch | chỉ dịch | phân tích + dịch + rà soát | phân tích + dịch + rà soát |
+| Canh chữ karaoke | ước lượng | Whisper | Whisper |
+
+**Lưu ý**: Các cài đặt riêng lẻ bên dưới sẽ ghi đè preset.
+
+### Ngữ cảnh video (Tùy chọn nhưng giúp dịch tốt hơn)
+
+```env
+TRANSLATE_DOMAIN=review công nghệ
+TRANSLATE_CONTEXT=Kênh đập hộp linh kiện máy tính giá rẻ, người xem là dân tự lắp máy.
+TRANSLATE_PRONOUNS=mình – các bạn
+TRANSLATE_GLOSSARY=显卡 = card đồ họa\n翻车 = toang\nCPU = CPU
+TRANSLATE_STYLE_NOTES=giọng hài hước, giữ thuật ngữ tiếng Anh
+```
+
+Các thông tin này giúp AI hiểu video của bạn để:
+- Xưng hô nhất quán từ đầu đến cuối
+- Dịch thuật ngữ chuyên ngành đúng ngữ cảnh
+- Giữ phong cách phù hợp với khán giả mục tiêu
+
+### Các cài đặt khác
+
+Xem file `CONFIGURATION.md` để biết danh sách đầy đủ tất cả các tùy chọn cấu hình.
+
+## Hiệu suất
+
+### Chỉ CPU (Intel i7-10700, 16GB RAM)
+- Nhận dạng Whisper: ~15 phút cho video 30 phút
+- Tách giọng Demucs: ~20 phút
+- Tổng hợp VieNeu: ~10 phút (3 workers)
+- **Tổng cộng**: ~50 phút cho video 30 phút
+
+### Với GPU (NVIDIA GTX 1060 6GB)
+- Nhận dạng Whisper: ~2 phút cho video 30 phút (**nhanh hơn 7.5 lần**)
+- Tách giọng Demucs: ~2 phút (**nhanh hơn 10 lần**)
+- Tổng hợp VieNeu: ~10 phút (CPU-only, không đổi)
+- **Tổng cộng**: ~15 phút cho video 30 phút (**nhanh hơn 3.3 lần**)
+
+### Với GPU cao cấp (NVIDIA RTX 3060 12GB)
+- **Tổng cộng**: ~10-12 phút cho video 30 phút (**nhanh hơn 4-5 lần**)
+
+**Khuyến nghị**: Nếu có card NVIDIA, nhất định chạy `cai_them_gpu.bat` để tận dụng GPU.
+
+## Cấu trúc dự án
+
+```
+voxdub/
+├── autodub/              # Pipeline chính
+│   ├── speech/           # Engine ASR (Whisper, Paraformer)
+│   ├── text/             # Module dịch thuật
+│   │   ├── translate_gemini.py       # Gemini Direct
+│   │   ├── translate_openrouter.py   # OpenRouter
+│   │   └── translate_voxdub.py       # VoxDub Cloud
+│   ├── voice/            # Engine TTS (VieNeu)
+│   ├── media/            # Xử lý âm thanh/video
+│   ├── config.py         # Quản lý cấu hình
+│   └── pipeline.py       # Luồng xử lý chính
+├── autodub_gui/          # Giao diện PySide6
+│   ├── pages/            # Các trang UI
+│   └── widgets/          # Widgets tùy chỉnh
+├── scripts/              # Scripts setup và tiện ích
+│   ├── setup_whisper.py
+│   ├── setup_vieneu.py
+│   ├── setup_paraformer.py
+│   └── setup_gpu.py
+├── output/               # Video đã xử lý
+├── .env                  # Cấu hình người dùng
+├── .env.example          # Mẫu cấu hình
+├── setup.bat             # Cài đặt tự động
+├── first_run_wizard.bat  # Hướng dẫn cấu hình
+├── cai_them_gpu.bat      # Cài GPU support
+└── chay_app.bat          # Chạy ứng dụng
+```
+
+## Xử lý sự cố
+
+### Python không tìm thấy
+1. Tải Python 3.10+ từ https://www.python.org/downloads/
+2. **Quan trọng**: Tích "Add Python to PATH" khi cài đặt
+3. Khởi động lại Command Prompt
+4. Kiểm tra: `python --version` hoặc `py --version`
+
+### ffmpeg không tìm thấy
+1. Tải ffmpeg từ https://www.gyan.dev/ffmpeg/builds/ (chọn "release full")
+2. Giải nén ra thư mục như `C:\ffmpeg`
+3. Thêm `C:\ffmpeg\bin` vào biến môi trường PATH:
+   - Mở Settings → System → About → Advanced system settings
+   - Environment Variables → Path → Edit → New
+   - Paste đường dẫn `C:\ffmpeg\bin`
+   - OK → OK → OK
+4. Khởi động lại Command Prompt
+5. Kiểm tra: `ffmpeg -version`
+
+### GPU không được phát hiện
+1. Cài driver NVIDIA mới nhất: https://www.nvidia.com/download/
+2. Chạy `cai_them_gpu.bat`
+3. Kiểm tra:
+   ```bash
+   .venv-gpu\Scripts\python -c "import torch; print(torch.cuda.is_available())"
+   ```
+4. Nếu vẫn báo `False`:
+   - Kiểm tra card có hỗ trợ CUDA không (GTX 900 trở lên, RTX series)
+   - Cài lại driver NVIDIA
+   - Cài CUDA Toolkit 12.4: https://developer.nvidia.com/cuda-downloads
+
+### Lỗi "ModuleNotFoundError"
+```bash
+# Cài lại dependencies
 pip install -r requirements.txt
-copy .env.example .env
-py scripts/setup_whisper.py      # bộ nghe-chép, ~1 GB
-py scripts/setup_vieneu.py       # bộ giọng đọc, ~300 MB
-py -m autodub_gui                # mở app
+
+# Hoặc chạy lại setup
+setup.bat
 ```
 
-</details>
-
----
-
-## 2. Chạy video đầu tiên
-
-1. Mở app → thanh bên trái chọn **Tạo dự án**
-2. **Dán link video** (hoặc bấm chọn file `.mp4` trên máy)
-3. Chọn **ngôn ngữ gốc** của video — tiếng Trung, tiếng Anh, tiếng Hàn…
-4. Chọn **giọng đọc** — bấm nghe thử trước cũng được
-5. Bấm **Bắt đầu lồng tiếng** rồi ngồi chờ
-
-Xong, app cho bạn 3 nút: **mở video**, **mở thư mục**, **chỉnh sửa từng câu**.
-
-> **Chạy dở bị tắt giữa chừng?** Không mất gì. Mọi bước đều lưu ra file — vào trang **Dự án**, mở lại dự án đó, app chạy tiếp từ đúng chỗ đã dừng.
-
----
-
-## 3. Bước dịch — hai cách
-
-Cả pipeline chạy offline, **trừ bước dịch**. Bạn chọn một trong hai:
-
-### Cách A — Dịch tay (mặc định, không cần cấu hình gì)
-
-Chạy tới bước dịch, app dừng lại và ghi sẵn file `TRANSLATE_PENDING.txt` ngay trong thư mục dự án. File đó là hướng dẫn từng bước, có kèm sẵn lời nhắn viết hoàn chỉnh để gửi cho AI:
-
-1. Bấm nút **Mở hướng dẫn** trong app (mở `TRANSLATE_PENDING.txt` bằng Notepad)
-2. Làm theo 3 bước ghi trong đó: copy `data/transcript_original.json` → dán vào **ChatGPT / Gemini** cùng lời nhắn có sẵn → lưu kết quả thành `data/transcript_vi.json`
-3. Quay lại app bấm **Đã dịch xong, tiếp tục**
-
-Miễn phí, không giới hạn, chất lượng tuỳ AI bạn dùng.
-
-### Cách B — Dịch tự động (cần tự dựng máy chủ)
-
-Thư mục `control_server/` chứa sẵn một backend Node.js làm việc dịch. Dựng theo `control_server/README.md`, rồi điền địa chỉ vào `.env`:
-
-```ini
-VOXDUB_API_URL=http://localhost:3001
+### Lỗi "Out of memory" (Hết RAM)
+Giảm số workers trong `.env`:
+```env
+PARALLEL_WORKERS=2
+VIENEU_MAX_WORKERS=2
+HQ_BACKGROUND=false
 ```
 
-Từ đó pipeline chạy một mạch từ link tới video hoàn chỉnh, không cần thao tác tay.
+### Video bị lag hoặc giọng không khớp
+1. Tăng `TIMING_MAX_DRIFT_S` trong `.env` (cho phép lệch nhiều hơn)
+2. Giảm `VOICE_SPEED` (giọng đọc chậm lại)
+3. Hoặc giảm `VIDEO_SPEED` (video chậm lại để giọng Việt có chỗ)
 
-> Để **trống** `VOXDUB_API_URL` = chạy thuần trên máy. App tự ẩn mọi thứ liên quan tới máy chủ và dùng Cách A.
+### Bản dịch không tốt
+1. Điền đầy đủ ngữ cảnh video ở Settings → Dịch thuật:
+   - Chủ đề video
+   - Ngữ cảnh (kênh nói về gì, người xem là ai)
+   - Cách xưng hô
+   - Thuật ngữ cố định
+2. Thử model khác (nếu dùng OpenRouter)
+3. Hoặc tắt dịch tự động, tự dịch bằng ChatGPT/Gemini
 
-### Dịch chuẩn hơn — điền ngữ cảnh video
+### API rate limit (quá giới hạn lượt gọi)
+- **Gemini free tier**: 15 lượt/phút
+- **OpenRouter**: Tùy model, thường 20 lượt/phút
 
-Trang **Dịch thuật** trên thanh bên có mấy ô giúp bản dịch bám sát video hơn (áp dụng cho cả hai cách):
-
-| Ô | Ví dụ |
-|---|---|
-| Chủ đề | `review công nghệ`, `phim cổ trang`, `vlog ẩm thực` |
-| Xưng hô | `mình – các bạn`, `tôi – anh em`, `huynh – muội` |
-| Thuật ngữ cố định | `内卷 = nội quyển`, mỗi dòng một cặp |
-| Ghi chú văn phong | `giọng trẻ trung, nhiều tiếng lóng` |
-
----
-
-## 4. Hướng dẫn từng trang
-
-### Tạo dự án — làm 1 video
-
-Ngoài link và giọng đọc, các tuỳ chọn đáng chú ý:
-
-- **Nhạc nền**: `Demucs` tách hẳn giọng khỏi nhạc (chất lượng cao nhất, mặc định) — hoặc `Duck` giảm nhỏ tiếng gốc khi có giọng đọc (nhanh hơn nhiều)
-- **Phụ đề**: không / **rời** (file `.srt`, bật tắt được trong trình phát) / **ghi thẳng vào hình** (luôn hiện, hợp đăng TikTok)
-- **Phụ đề & che chữ…**: mở khung xem trước ngay trên khung hình video — **kéo thả** dòng phụ đề để đặt vị trí, chỉnh font/cỡ/màu/viền thấy ngay, và **khoanh vùng bằng chuột** để che mờ chữ Trung trên hình
-
-### Xử lý hàng loạt — nhiều video một lượt
-
-Dán link vào ô, **mỗi dòng một video**:
-
-```
-https://youtu.be/abc123
-https://youtu.be/def456 | nữ
-https://www.douyin.com/video/789 | nam
-# dòng bắt đầu bằng # là ghi chú, bỏ qua
+Giảm `TRANSLATE_BATCH_SIZE` trong `.env` (dịch ít câu hơn mỗi lần gọi):
+```env
+TRANSLATE_BATCH_SIZE=20  # Thay vì 40
 ```
 
-- Giọng đọc và ngôn ngữ chọn một lần cho cả loạt; muốn video nào khác giọng thì thêm `| nam` hoặc `| nữ` ở cuối dòng
-- **Tiến độ tự lưu** vào `batch_state.json` — tắt app mở lại, dán lại danh sách cũ, video đã xong tự bỏ qua
+## Tài liệu bổ sung
 
-### Trình chỉnh sửa — sửa từng câu
+- [INSTALLATION.md](INSTALLATION.md) - Hướng dẫn cài đặt chi tiết (tiếng Anh)
+- [CONFIGURATION.md](CONFIGURATION.md) - Tham khảo đầy đủ các tùy chọn cấu hình
+- [.env.example](.env.example) - Mẫu file cấu hình với giải thích từng dòng
+- [VERIFICATION_REPORT.md](VERIFICATION_REPORT.md) - Báo cáo kiểm tra end-to-end
 
-- Bảng liệt kê từng câu, bản gốc và bản dịch cạnh nhau
-- Bấm **▶** nghe thử câu đó; **nhấp đôi** vào ô bản dịch để sửa
-- Sửa bao nhiêu câu tuỳ thích rồi bấm **Lưu tất cả và đọc lại** một lần — app chỉ đọc lại đúng những câu đã sửa
-- Bấm **Xuất video** khi ưng. Cạnh đó có sẵn nút tải riêng file `.SRT`, `.ASS` hoặc MP3 lồng tiếng.
+## Hỗ trợ
 
-### Giọng đọc AI
-
-Thư viện giọng có bộ lọc theo **giới tính / vùng miền / phong cách**, nút **nghe thử** từng giọng. Repo đi kèm sẵn **120 giọng mẫu** trong `voices/preset_voices_vn/`.
-
-**Thêm giọng của riêng bạn:** chọn một file WAV dài 5–10 giây (nói rõ, không nhạc nền), nhập đúng nội dung câu nói trong đó — app tự học và thêm vào thư viện.
-
-> Không dùng tính năng này để giả mạo giọng người khác.
-
-### Phụ đề
-
-Các bộ kiểu dựng sẵn: `clean`, `bold_yellow`, `box`, `tiktok`, `karaoke`, `cinema`. Chỉnh được vị trí, font, cỡ chữ, viền, bóng, nền mờ kiểu CapCut, số chữ mỗi dòng.
-
-Chế độ **karaoke** làm chữ nhảy theo giọng đọc; bật *Khớp mốc chữ thật* để app nghe lại chính giọng vừa tạo và căn chuẩn từng cụm (thêm khoảng 30–60 giây mỗi video).
-
-### Tải xuống
-
-Chỉ tải video về, không lồng tiếng. Dán nhiều link một lượt. Hỗ trợ cookies trình duyệt cho video cần đăng nhập.
-
-### Báo cáo chất lượng
-
-Đọc `quality_report.json` của một dự án: bao nhiêu câu khớp đẹp, câu nào bị nén hoặc dồn trễ, câu nào chồng tiếng. Xem trang này để biết cần sửa tay câu nào.
-
-### Cài đặt
-
-Có một **nút vặn tổng** là `QUALITY_PRESET`: `fast` / `balanced` (khuyên dùng) / `quality`. Chỉnh mục chi tiết nào thì mục đó ghi đè preset.
-
-| Thẻ | Nội dung chính |
-|---|---|
-| Cơ bản | Model Whisper, bộ nhận dạng, thư mục xuất, ngôn ngữ mặc định, tên hiển thị |
-| Hiệu suất | Số việc chạy song song, số luồng giọng đọc |
-| Nâng cao | Tốc độ video/giọng, ngân sách ký tự mỗi giây, chống chồng tiếng, âm lượng, dọn file trung gian |
-
----
-
-## 5. Kết quả nằm ở đâu
-
-Mỗi lần chạy tạo một thư mục trong `output/`:
-
-```
-output/VN/20260809103000_vi/
-├── dubbed_video.mp4            ← VIDEO HOÀN CHỈNH (thứ bạn cần)
-├── transcript_vi.srt           ← phụ đề tiếng Việt rời
-├── youtube/                    ← tiêu đề, mô tả, hashtag, prompt thumbnail
-└── data/                       ← file kỹ thuật, dùng để chạy tiếp & sửa câu
-    ├── transcript_original.json/.srt   ← lời gốc app nghe được
-    ├── transcript_vi.json              ← bản dịch tiếng Việt
-    ├── original_audio.wav, vocals.wav, no_vocals.wav
-    ├── audio_vi_full.wav               ← toàn bộ giọng đọc đã ghép
-    ├── segments/                       ← giọng đọc từng câu (cache)
-    ├── quality_report.json             ← chấm điểm khớp thời gian
-    └── timing_guide.json               ← liệt kê câu bị lệch, cần sửa tay
-```
-
-Mọi bước đều **cache theo file**: xoá file nào thì riêng bước đó chạy lại, phần còn lại giữ nguyên.
-
-> Muốn tiết kiệm ổ cứng, bật `AUTO_CLEAN_INTERMEDIATES=true` — nhưng dự án đã dọn thì **không sửa từng câu hay xuất lại được nữa**.
-
----
-
-## 6. Cài thêm (không bắt buộc)
-
-Mỗi mục là một file `.bat`, đúp chuột là chạy:
-
-| File | Làm gì | Dung lượng |
-|---|---|---|
-| `cai_them_paraformer.bat` | Bộ nghe tiếng Trung **Paraformer** — chính xác hơn Whisper và nhanh hơn trên CPU. Cài xong app tự dùng cho video tiếng Trung. | ~520 MB |
-| `cai_them_douyin.bat` | Trình duyệt Chromium để tải video **Douyin** thẳng từ link | ~170 MB |
-| `nap_giong_doc.bat` | Nạp 120 giọng mẫu trong `voices/` vào app. Thả thêm file `.wav` vào `voices/custom/` rồi chạy lại để thêm giọng riêng. | — |
-
-Cần GPU NVIDIA để Whisper và Demucs chạy nhanh hơn? App tự phát hiện và dùng, không cần cấu hình gì.
-
----
-
-## 7. Câu hỏi thường gặp
-
-**Lần đầu chạy rất lâu?**
-Whisper và Demucs phải tải model về (vài GB, **một lần duy nhất**). Từ lần thứ hai trở đi nhanh hơn hẳn.
-
-**Máy không có card đồ hoạ có chạy được không?**
-Được hết. Whisper chạy CPU tốt (chọn model `medium`), giọng đọc VieNeu vốn được thiết kế cho CPU (~1 giây/câu). Có GPU thì tự nhanh hơn.
-
-**Lỗi `No such filter: subtitles` khi ghi phụ đề vào hình?**
-ffmpeg của bạn thiếu libass. Cài lại bản **full** từ gyan.dev, hoặc tạm chuyển phụ đề sang chế độ **rời**.
-
-**Giọng đọc bị chồng lên nhau / nhanh quá?**
-Tiếng Việt thường dài hơn tiếng gốc khoảng 20%. Ba cách xử lý, thử theo thứ tự:
-1. Vào **Trình chỉnh sửa**, viết lại những câu dài cho ngắn gọn hơn
-2. Giảm `TRANSLATE_CPS_BUDGET` (mặc định `12.5`) để bản dịch tự ngắn lại
-3. Đặt `VIDEO_SPEED=0.9` — làm chậm cả video một chút để có thêm chỗ trống
-
-Câu nào bị lệch đều được liệt kê trong `data/timing_guide.json` và trang **Báo cáo chất lượng**.
-
-**Không tải được video Douyin?**
-Chạy `cai_them_douyin.bat`. Một số video vẫn cần cookies đăng nhập — trang **Tải xuống** có hỗ trợ.
-
-**Chạy `cai_dat.bat` bị lỗi giữa chừng?**
-Cứ chạy lại. Script được viết để chạy lại nhiều lần vô hại — phần đã xong sẽ bỏ qua.
-
-**App báo thiếu bộ giọng đọc?**
-Chạy lại `cai_dat.bat` (bước 5), hoặc gõ `py scripts/setup_vieneu.py`.
-
-**Tôi có phải trả tiền gì không?**
-Không. Toàn bộ pipeline chạy trên máy bạn. Chỉ khi bạn tự dựng máy chủ dịch ở [Cách B](#cách-b--dịch-tự-động-cần-tự-dựng-máy-chủ) thì mới phát sinh chi phí API của chính bạn.
-
----
-
-## 8. Dành cho lập trình viên
-
-### Cấu trúc
-
-```
-autodub/                 # lõi pipeline, không phụ thuộc GUI
-├── pipeline.py          # DubPipeline — chạy đủ các bước, cache theo file
-├── editor.py            # sửa câu / đọc lại / xuất lại
-├── batch.py             # chạy hàng loạt, state crash-safe
-├── config.py            # Settings đọc từ .env, validate lười
-├── workdir.py           # bố cục thư mục dự án (data/, youtube/)
-├── progress.py          # ProgressEvent callback + cancel
-├── media/               # download, audio, video, phụ đề, che chữ, Demucs
-├── speech/              # ASR (Whisper, Paraformer) + TTS (VieNeu, CapCut)
-├── text/                # SRT, karaoke ASS, dịch, TRANSLATE_PENDING.txt
-├── content/             # tiêu đề/mô tả/hashtag + prompt thumbnail
-└── saas_client.py       # cổng duy nhất tới máy chủ dịch (tuỳ chọn)
-
-autodub_gui/             # giao diện PySide6, dark theme
-├── app.py               # MainWindow — thanh bên + các trang
-├── workers.py           # QThread cho từng việc nặng
-├── pages/               # mỗi trang một file
-├── ui/                  # widget dùng chung
-├── video/               # trình phát + timeline
-├── theme.py             # QSS
-└── tokens.py            # design tokens — file DUY NHẤT chứa mã màu
-
-scripts/                 # cài đặt & đóng gói (mỗi script chạy lại được)
-control_server/          # backend Node.js cho bước dịch (tuỳ chọn)
-voices/preset_voices_vn/ # 120 giọng mẫu, đi kèm repo
-tests/                   # 584 test
-```
-
-### Nguyên tắc thiết kế
-
-- **Mỗi thành phần nặng một virtualenv riêng** — `.venv-vieneu` (ONNX, không torch), `.venv-whisper`, `.venv-asr`. Môi trường chính nhẹ, không xung đột phiên bản.
-- **Cache theo file, không theo bộ nhớ** — mọi bước ghi kết quả ra đĩa, nên chạy tiếp sau khi tắt máy là chuyện bình thường.
-- **Máy chủ là tuỳ chọn** — `saas_client.is_configured()` là chốt duy nhất; không cấu hình thì mọi thứ tự rẽ sang chế độ chạy thuần trên máy.
-- **`tokens.py` là nơi duy nhất có mã màu** — không hardcode màu ở chỗ khác.
-
-### Chạy test
-
-```bash
-py -m pytest -q
-```
-
-### Đóng gói `.exe`
-
-```bash
-py scripts/build_exe.py
-```
-
-Góp ý và báo lỗi: <https://github.com/ttthanh2044/voxdub/issues>
-
----
-
-## 9. Ủng hộ tác giả
-
-Dự án này miễn phí và mã nguồn mở. Nếu nó giúp ích cho bạn, có thể mời tác giả một ly cà phê:
-
-| | |
-|---|---|
-| **Ngân hàng** | MB Bank |
-| **Số tài khoản** | `0983832373` |
-| **Chủ tài khoản** | TRAN TAN THANH |
-
-Cảm ơn bạn rất nhiều. Một ngôi sao ⭐ trên GitHub cũng đã là động lực lớn.
-
----
+- **Báo lỗi**: https://github.com/ttthanh2044/voxdub/issues
+- **Kiểm tra cập nhật**: Xem GitHub releases
+- **Thảo luận**: GitHub Discussions
 
 ## Giấy phép
 
-Mã nguồn theo giấy phép **MIT** — xem [LICENSE](LICENSE).
+Mã nguồn mở - xem file LICENSE để biết chi tiết.
 
-Các model AI mà app tải về (VieNeu, Whisper, Paraformer, Demucs) có giấy phép riêng của từng dự án; kiểm tra trước khi dùng cho mục đích thương mại.
+## Ghi công
 
-**Xin đừng dùng để giả mạo giọng người khác, hoặc lồng tiếng nội dung vi phạm bản quyền.**
+- **Whisper**: Công nghệ nhận dạng giọng nói của OpenAI
+- **VieNeu**: Công nghệ tổng hợp giọng tiếng Việt
+- **Paraformer**: ASR của Alibaba DAMO Academy
+- **Demucs**: Công nghệ tách giọng của Facebook Research
+- **PySide6**: Framework giao diện đồ họa
+- **Google Gemini**: API dịch thuật miễn phí
+- **OpenRouter**: Cổng truy cập đa mô hình AI
+
+---
+
+**Phát triển bởi**: ttthanh2044
+**Phiên bản**: 1.0.0
+**Cập nhật lần cuối**: 2026-08-12
+
+
+## Translation providers (Gemini / OpenRouter / DeepSeek)
+
+Open **D?ch thu?t** in the sidebar, then choose a provider and enter its API key,
+Base URL, model and temperature. API-key controls are password-masked and include
+a show/hide button. Model fields accept custom values and are not hardcoded.
+
+- Gemini default Base URL: `https://generativelanguage.googleapis.com/v1beta`
+- OpenRouter default Base URL: `https://openrouter.ai/api/v1`
+- DeepSeek default Base URL: `https://api.deepseek.com`
+
+A direct-provider failure stops the translation stage with an actionable error;
+it is never silently reported as a successful manual fallback.
+
+## Windows helper files
+
+- `install.bat` / `setup.bat`: install prerequisites and Python dependencies.
+- `run.bat` / `chay_app.bat`: launch the application from any working directory.
+- `update.bat`: fast-forward from Git and refresh dependencies.
+- `uninstall.bat`: remove generated runtimes while preserving `output/`.
+
+## Logs and diagnostics
+
+Runtime logs are stored at `logs/voxdub.log` with 14-day rotation. Secrets are
+not included. The application records the actual CUDA runtime result, GPU name,
+ASR device, Demucs device and selected FFmpeg encoder instead of inferring GPU
+status from a folder name.
+
+## Verified architecture and execution flow
+
+The desktop entry point is `autodub_gui.__main__` -> `autodub_gui.app.main`.
+The UI starts `DubWorker`, which calls `DubPipeline.run`. The traced production
+flow is: acquire local/remote input -> dual audio extraction -> background
+separation -> selected ASR with explicit source language -> selected translation
+provider -> VieNeu/CapCut TTS -> voice normalization and soft timing -> streamed
+audio mix -> FFmpeg mux/subtitle render -> metadata/report export.
+
+OCR is not part of the current execution flow. Source-caption removal is manual
+blur-region rendering, not OCR.
