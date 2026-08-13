@@ -25,35 +25,24 @@ def _enable_cuda_dlls() -> bool:
     tệp .dll dùng được (ngoài Windows thì coi như hệ thống đã có).
     """
     if os.name != "nt":
-        logger.debug("Non-Windows system: assuming CUDA libraries available via system")
         return True
     import glob
 
     venv = gpu_venv_dir()
     if not venv:
-        logger.debug("GPU venv not found — CUDA unavailable")
         return False
-
     lib_dir = os.path.join(venv, "Lib", "site-packages", "torch", "lib")
-    if not os.path.isdir(lib_dir):
-        logger.debug(f"torch/lib directory not found: {lib_dir}")
-        return False
-
     # Glob thay vì ghim cublas64_12: torch cu13 mang cublas64_13 — ghim
     # cứng số phiên bản là rơi về CPU âm thầm sau một lần nâng cấp venv.
     matches = glob.glob(os.path.join(lib_dir, "cublas64_*.dll"))
     if not matches:
-        logger.debug(f"cuBLAS DLL not found in {lib_dir}")
         return False
-
     try:
         # Keep the handle alive for later lazy loads of cuDNN by CTranslate2.
         _CUDA_DLL_DIRECTORY_HANDLES.append(os.add_dll_directory(lib_dir))
         ctypes.CDLL(matches[0])
-        logger.debug(f"Successfully loaded CUDA DLLs from {lib_dir}")
         return True
-    except OSError as e:
-        logger.debug(f"Failed to load CUDA DLLs: {e}")
+    except OSError:
         return False
 
 
@@ -86,12 +75,8 @@ def _load_whisper_model(model_name: str, settings: Settings):
     """
     from faster_whisper import WhisperModel
 
-    cuda_available = _enable_cuda_dlls()
-    logger.info(f"GPU Detection: CUDA available = {cuda_available}")
-
-    if cuda_available:
+    if _enable_cuda_dlls():
         resolved = settings.resolved_whisper_model(cuda_available=True)
-        logger.info(f"Attempting to load Whisper '{resolved}' on GPU...")
         # GPU_LOCK chỉ quanh lúc NẠP: đây là đoạn xin VRAM, cũng là chỗ chen
         # với Demucs thì OOM. Giữ lock suốt lượt nghe sẽ chặn Demucs hàng chục
         # phút mà không cần thiết. Xem autodub/resources.py.
@@ -103,22 +88,15 @@ def _load_whisper_model(model_name: str, settings: Settings):
                 try:
                     model = WhisperModel(resolved, device="cuda",
                                          compute_type=compute)
-                    logger.info(f"✓ Whisper '{resolved}' loaded successfully on GPU "
+                    logger.info(f"Whisper '{resolved}' chạy trên GPU "
                                 f"(CUDA, {compute})")
                     return model, "cuda"
                 except Exception as e:
-                    logger.debug(f"Whisper GPU {compute} failed: {e}")
-        logger.warning("✗ Failed to load Whisper on GPU — falling back to CPU")
-        logger.warning("Reason: All CUDA compute types failed. Check GPU memory and CUDA installation.")
-    else:
-        logger.info("CUDA not available — using CPU for Whisper")
-        logger.info("To enable GPU: ensure .venv-gpu exists with torch+CUDA installed")
-
+                    logger.warning(
+                        f"Whisper GPU {compute} không chạy được ({e})")
+        logger.warning("Không chạy được Whisper trên GPU — dùng CPU")
     resolved = settings.resolved_whisper_model(cuda_available=False)
-    logger.info(f"Loading Whisper '{resolved}' on CPU...")
-    model = WhisperModel(resolved, device="cpu", compute_type="int8")
-    logger.info(f"✓ Whisper '{resolved}' loaded successfully on CPU")
-    return model, "cpu"
+    return WhisperModel(resolved, device="cpu", compute_type="int8"), "cpu"
 
 
 def _gpu_total_vram_gb() -> float:
@@ -182,58 +160,29 @@ def transcribe(audio_path: str, language: str, settings: Settings,
     """Transcribe audio with the configured local ASR (free, offline).
 
     Engines: Whisper (default, multilingual) or Paraformer (Chinese only,
-    CPU/ONNX in .venv-asr — more accurate on zh sources).
-
-    CRITICAL: User-selected ASR engine must be respected. Only use the engine
-    explicitly configured in settings.asr_engine. Fallback only occurs when
-    the selected engine is unavailable (not configured), and only with clear
-    error messaging.
+    CPU/ONNX in .venv-asr — more accurate on zh sources). Paraformer failures
+    or misconfiguration fall back to Whisper so a run never dies here.
 
     Segments keep the engine's fragment granularity — translation, subtitles,
     the editor AND the voice all follow the source video's own per-fragment
     timeline (strict 1:1 rendering, one clip per segment).
     """
-    if not language:
-        raise ValueError(
-            "Language must be explicitly specified. Please select the video's "
-            "language in the UI. Automatic language detection is disabled.")
-
     segments = None
-    selected_engine = settings.asr_engine.lower()
-
-    # Log the configuration being used
-    logger.info(f"ASR Configuration: engine={selected_engine}, language={language}")
-
-    if selected_engine == "paraformer":
-        # User explicitly selected Paraformer
+    if settings.asr_engine == "paraformer":
         if not (language or "").lower().startswith("zh"):
-            raise ValueError(
-                f"Paraformer only supports Chinese language. Your selected language "
-                f"is '{language}'. Please either:\n"
-                f"1. Change language to Chinese (zh-CN), OR\n"
-                f"2. Change ASR engine to Whisper in Settings.")
-
-        if not settings.paraformer_configured():
-            raise RuntimeError(
-                "Paraformer is selected but not installed. Please run "
-                "'cai_them_paraformer.bat' to install Paraformer, OR change "
-                "ASR_ENGINE to 'whisper' in Settings.")
-
-        try:
-            from autodub.speech.paraformer_transcriber import (
-                transcribe_paraformer)
-            logger.info("Using Paraformer (user-selected)")
-            segments = transcribe_paraformer(audio_path, settings)
-        except Exception as e:
-            # Paraformer was explicitly selected but failed
-            raise RuntimeError(
-                f"Paraformer failed: {e}\n"
-                f"Your ASR_ENGINE is set to 'paraformer'. If you want to use "
-                f"Whisper instead, change ASR_ENGINE to 'whisper' in Settings.") from e
-
-    else:  # whisper or any other value defaults to Whisper
-        # User selected Whisper (or default)
-        logger.info("Using Whisper (user-selected or default)")
+            logger.warning("Paraformer chỉ hỗ trợ tiếng Trung — dùng Whisper "
+                           f"cho ngôn ngữ '{language}'")
+        elif not settings.paraformer_configured():
+            logger.warning("Paraformer chưa cài (đúp chuột 'Cai dat ASR tieng "
+                           "Trung (Paraformer).bat') — dùng Whisper")
+        else:
+            try:
+                from autodub.speech.paraformer_transcriber import (
+                    transcribe_paraformer)
+                segments = transcribe_paraformer(audio_path, settings)
+            except Exception as e:
+                logger.warning(f"Paraformer lỗi ({e}) — chuyển sang Whisper")
+    if segments is None:
         # Ưu tiên subprocess worker (venv riêng) để không cần bundle
         # faster-whisper trong exe — cắt ~112 MB kích thước bản phân phối.
         # Fallback về in-process khi venv chưa cài (dev) hoặc cache đang giữ.
@@ -421,15 +370,7 @@ def _transcribe_whisper(audio_path: str, language: str, settings: Settings,
     (word + start/end thật) để :func:`split_long_segments` cắt câu dài tại
     mốc thời gian THẬT của từ, thay vì chia theo tỷ lệ ký tự (đoán). Mảng
     words bị loại khỏi kết quả cuối — transcript trên đĩa giữ format cũ.
-
-    CRITICAL: language parameter must be explicitly provided by user.
-    No automatic language detection is performed.
     """
-    if not language:
-        raise ValueError(
-            "Language must be explicitly specified. Automatic language detection "
-            "is disabled. Please select the video's language in the UI.")
-
     whisper_lang = WHISPER_LANG_MAP.get(language, language.split("-")[0])
     model_name = settings.whisper_model
 
@@ -440,7 +381,6 @@ def _transcribe_whisper(audio_path: str, language: str, settings: Settings,
         model, _device = _load_whisper_model(model_name, settings)
 
     logger.info(f"Starting transcription: {audio_path} (language: {whisper_lang})")
-    logger.info(f"Using user-selected language: {language} (mapped to Whisper: {whisper_lang})")
     raw_segments, info = model.transcribe(
         audio_path,
         language=whisper_lang,
@@ -449,12 +389,9 @@ def _transcribe_whisper(audio_path: str, language: str, settings: Settings,
         vad_parameters={"min_silence_duration_ms": 500},
         word_timestamps=True,
     )
-    # Language detection info is logged but NEVER used to override user choice
-    detected_lang = getattr(info, "language", None)
-    if detected_lang:
-        logger.debug(f"Whisper detected language: {detected_lang} "
-                    f"(confidence {getattr(info, 'language_probability', 0):.0%}) "
-                    f"[INFO ONLY - user selection '{whisper_lang}' was used]")
+    if whisper_lang is None and getattr(info, "language", None):
+        logger.info(f"Ngôn ngữ tự nhận dạng: {info.language} "
+                    f"(độ tin cậy {getattr(info, 'language_probability', 0):.0%})")
 
     segments = []
     segment_id = 0
@@ -533,10 +470,10 @@ def split_long_segments(segments: list[dict], max_duration: float = 10.0) -> lis
             result.append({**seg, "id": new_id})
             continue
 
-        # Split text at sentence boundaries. CJK marks (。!?;) carry no
+        # Split text at sentence boundaries. CJK marks (。！？；) carry no
         # trailing space, so match with \s* — benefits both Paraformer output
         # and Whisper zh transcripts.
-        sentences = re.split(r'(?<=[.!?;。!?;])\s*', seg["text"].strip())
+        sentences = re.split(r'(?<=[.!?;。！？；])\s*', seg["text"].strip())
         sentences = [s for s in sentences if s]
         if len(sentences) <= 1:
             # No sentence boundary found, keep as-is

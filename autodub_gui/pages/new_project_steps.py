@@ -218,13 +218,18 @@ class RecognizeStep(_StepPanel):
             "về càng nặng.")
         self.language = LabeledCombo(
             "Ngôn ngữ trong video", consts.SOURCE_LANGS,
-            "Chọn ngôn ngữ gốc của video để nhận dạng chính xác nhất. "
-            "Tự động nhận dạng đã bị vô hiệu hóa để tránh lỗi.")
+            "Cho biết video gốc nói tiếng gì.")
+        self.auto_detect = QCheckBox("Để ứng dụng tự nhận ra ngôn ngữ")
+        self.auto_detect.setToolTip(
+            "Bật khi bạn không chắc video nói tiếng gì. Tắt thì dùng đúng "
+            "ngôn ngữ bạn chọn ở trên, thường chính xác hơn.")
+        self.auto_detect.toggled.connect(self._on_auto)
         for widget in (self.engine, self.model, self.language):
             widget.changed.connect(self.changed.emit)
         self.body.addWidget(self.engine)
         self.body.addWidget(self.model)
         self.body.addWidget(self.language)
+        self.body.addWidget(self.auto_detect)
 
         # Nhạc nền — dọn về đây từ bước Xuất video cũ, vì tách giọng chạy
         # ngay sau bước nghe; gập lại mặc định cho gọn.
@@ -245,6 +250,10 @@ class RecognizeStep(_StepPanel):
         self.finish()
         self._on_background()
 
+    def _on_auto(self, checked: bool) -> None:
+        self.language.setEnabled(not checked)
+        self.changed.emit()
+
     def _on_background(self) -> None:
         self.duck.setEnabled(self.background.current_key() == "duck")
         self.changed.emit()
@@ -254,7 +263,7 @@ class RecognizeStep(_StepPanel):
             "asr_engine": self.engine.current_key(),
             "whisper_model": self.model.current_key(),
             "source_lang": self.language.current_key(),
-            "auto_detect": False,  # Always disabled for accuracy
+            "auto_detect": self.auto_detect.isChecked(),
             "bg_mode": self.background.current_key(),
             "bg_duck_db": self.duck.value(),
         }
@@ -263,7 +272,7 @@ class RecognizeStep(_StepPanel):
         self.engine.set_key(data.get("asr_engine", "whisper"))
         self.model.set_key(data.get("whisper_model", "auto"))
         self.language.set_key(data.get("source_lang", "zh-CN"))
-        # auto_detect removed - always require explicit language selection
+        self.auto_detect.setChecked(bool(data.get("auto_detect", False)))
         self.background.set_key(data.get("bg_mode", "demucs"))
         self.duck.set_value(float(data.get("bg_duck_db", -12.0)))
         self._on_background()

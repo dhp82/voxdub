@@ -276,7 +276,6 @@ def _run_demucs_gpu_worker(
     """
     python = gpu_venv_python()
     if not python:
-        logger.info("GPU venv not available — Demucs will use CPU")
         return False
 
     cmd = [python, _WORKER_SCRIPT,
@@ -286,7 +285,7 @@ def _run_demucs_gpu_worker(
            "--model", model_name]
     if _low_ram():
         cmd.append("--chunked")
-    logger.info(f"Attempting to run Demucs ({model_name}) on GPU...")
+    logger.info(f"Running Demucs ({model_name}) in GPU worker on {input_wav}")
     try:
         # GPU_LOCK: pipeline đã *dự đoán* ASR không dùng GPU trước khi cho hai
         # việc chạy song song. Lock là lưới an toàn cho lúc dự đoán sai — khi
@@ -297,7 +296,7 @@ def _run_demucs_gpu_worker(
             result = subprocess.run(cmd, capture_output=True, encoding="utf-8",
                                     errors="replace", timeout=3600)
     except subprocess.TimeoutExpired:
-        logger.warning("✗ Demucs GPU worker timed out (>60 min) — falling back to CPU")
+        logger.warning("Demucs GPU worker quá 60 phút — chuyển sang CPU")
         return False
     try:
         resp = json.loads((result.stdout or "").strip().splitlines()[-1])
@@ -305,10 +304,9 @@ def _run_demucs_gpu_worker(
         resp = {"ok": False, "error": (result.stderr or "no output")[-200:]}
     if not resp.get("ok"):
         logger.warning(
-            f"✗ Demucs GPU worker failed: {resp.get('error')} — falling back to CPU")
+            f"Demucs GPU worker failed ({resp.get('error')}) — dùng CPU")
         return False
-    device = resp.get('device', 'unknown')
-    logger.info(f"✓ Demucs separation completed successfully on {device.upper()}")
+    logger.info(f"Demucs separation done on {resp.get('device')}")
     return True
 
 

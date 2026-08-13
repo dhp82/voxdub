@@ -207,18 +207,9 @@ class LabeledLineEdit(_Field):
             self.edit.setToolTip(hint)
         if password:
             self.edit.setEchoMode(QLineEdit.EchoMode.Password)
-            row = QHBoxLayout(); row.setSpacing(tokens.SP_2); row.addWidget(self.edit, 1)
-            self._show_key = GhostButton("Show"); self._show_key.setCheckable(True)
-            self._show_key.toggled.connect(self._toggle_password); row.addWidget(self._show_key)
-            self._root.addLayout(row)
-        else:
-            self._root.addWidget(self.edit)
         self.edit.textChanged.connect(self.changed.emit)
+        self._root.addWidget(self.edit)
         self._finish()
-
-    def _toggle_password(self, shown: bool) -> None:
-        self.edit.setEchoMode(QLineEdit.EchoMode.Normal if shown else QLineEdit.EchoMode.Password)
-        self._show_key.setText("Hide" if shown else "Show")
 
     def text(self) -> str:
         return self.edit.text().strip()

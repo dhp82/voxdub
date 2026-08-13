@@ -664,12 +664,9 @@ def _smoke_report(window: MainWindow) -> int:
     _probe_video_playback(checks, settings)
     _probe_env_file(checks)
 
-    # Whisper and Playwright intentionally live in sidecar environments in the
-    # packaged app; requiring their in-process imports makes every valid onedir
-    # build fail its own smoke test.
     required = ("gui_constructed", "env_path_writable", "yt_dlp_importable",
-                "worker_scripts_found", "new_modules_importable",
-                "multimedia_importable")
+                "faster_whisper_importable", "worker_scripts_found",
+                "new_modules_importable", "multimedia_importable")
     checks["ok"] = all(checks.get(k) for k in required)
 
     out = os.path.join(app_root(), "smoke_test_result.json")

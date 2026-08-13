@@ -51,6 +51,3 @@ control_server/logs/
 # Website
 website/node_modules/
 website/dist/
-
-# Local audit tooling
-.vibe-doctor/

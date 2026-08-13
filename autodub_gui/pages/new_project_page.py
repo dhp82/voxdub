@@ -361,7 +361,8 @@ class NewProjectPage(BasePage):
         return data
 
     def _source_lang_label(self) -> str:
-        """Trả về label ngôn ngữ gốc. Auto-detect đã bị vô hiệu hóa."""
+        if self.step_recognize.auto_detect.isChecked():
+            return "Tự nhận ra từ video"
         code = self.step_recognize.language.current_key()
         return next((label for label, key in consts.SOURCE_LANGS
                      if key == code), code)
@@ -612,7 +613,7 @@ class NewProjectPage(BasePage):
             file_path=(prefetched if prefetched
                        else data["file_path"] if source in ("file", "resume")
                        else None),
-            source_lang=data["source_lang"],  # auto_detect always False
+            source_lang=("" if data["auto_detect"] else data["source_lang"]),
             voice=data["voice"] or None,
             bg_mode=data["bg_mode"],
             bg_duck_db=data["bg_duck_db"],

@@ -232,22 +232,11 @@ class Settings:
     generate_metadata: bool = True
 
     # --- Dịch tự động -----------------------------------------------------
+    # Mô hình, lời nhắc và API key đều nằm trên máy chủ VoxDub — app chỉ gửi
+    # câu thoại và ngữ cảnh. Hai nút vặn dưới đây là thứ duy nhất còn lại ở
+    # phía máy khách vì chúng quyết định cách CHIA VIỆC, không phải cách dịch.
     translate_enabled: bool = True
-    # Provider: "voxdub" (backend) | "gemini" | "openrouter" | "deepseek"
-    translate_provider: str = "voxdub"
-    # API keys for direct provider integration (stored securely)
-    gemini_api_key: str = ""
-    openrouter_api_key: str = ""
-    deepseek_api_key: str = ""
-    # Model selection for each provider
-    gemini_base_url: str = "https://generativelanguage.googleapis.com/v1beta"
-    gemini_model: str = "gemini-2.0-flash"
-    openrouter_base_url: str = "https://openrouter.ai/api/v1"
-    openrouter_model: str = "google/gemini-2.0-flash-001"
-    deepseek_base_url: str = "https://api.deepseek.com"
-    deepseek_model: str = "deepseek-chat"
-    translate_temperature: float = 0.3
-    # Số câu mỗi lượt gửi (trần cứng phía máy chủ VoxDub là 120).
+    # Số câu mỗi lượt gửi lên máy chủ (trần cứng phía máy chủ là 120).
     translate_batch_size: int = 40
 
     # --- Phụ đề -----------------------------------------------------------
@@ -403,18 +392,6 @@ class Settings:
                               not in ("0", "false", "no"),
             translate_enabled=env("TRANSLATE_ENABLED", "true").strip().lower()
                               not in ("0", "false", "no"),
-            translate_provider=_one_of(env("TRANSLATE_PROVIDER", "voxdub"),
-                                      ("voxdub", "gemini", "openrouter", "deepseek"), "voxdub"),
-            gemini_api_key=env("GEMINI_API_KEY").strip(),
-            openrouter_api_key=env("OPENROUTER_API_KEY").strip(),
-            deepseek_api_key=env("DEEPSEEK_API_KEY").strip(),
-            gemini_base_url=env("GEMINI_BASE_URL", "https://generativelanguage.googleapis.com/v1beta").strip().rstrip("/"),
-            gemini_model=env("GEMINI_MODEL", "gemini-2.0-flash").strip(),
-            openrouter_base_url=env("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1").strip().rstrip("/"),
-            openrouter_model=env("OPENROUTER_MODEL", "google/gemini-2.0-flash-001").strip(),
-            deepseek_base_url=env("DEEPSEEK_BASE_URL", "https://api.deepseek.com").strip().rstrip("/"),
-            deepseek_model=env("DEEPSEEK_MODEL", "deepseek-chat").strip(),
-            translate_temperature=min(2.0, max(0.0, env_float("TRANSLATE_TEMPERATURE", "0.3"))),
             translate_batch_size=max(1, min(100,
                 env_int("TRANSLATE_BATCH_SIZE", "40"))),
             subtitle_mode=_one_of(env("SUBTITLE_MODE", "none"),

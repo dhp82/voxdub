@@ -1,4 +1,10 @@
-"""Translation provider and context configuration page."""
+"""Trang Dịch thuật — ngữ cảnh video và kiểm tra kết nối máy chủ.
+
+Mô hình, lời nhắc và API Key đã chuyển hẳn lên máy chủ VoxDub, nên trang này
+không còn ô API Key nào. Thứ còn lại là NGỮ CẢNH: những gì người làm kênh
+biết về video mà máy không tự đoán chính xác được — chủ đề, xưng hô, thuật
+ngữ phải dịch cố định.
+"""
 from __future__ import annotations
 
 from PySide6.QtWidgets import QWidget
@@ -13,9 +19,9 @@ class TranslateToolPage(ToolPage):
 
     TAB = spec.TAB_TRANSLATE
     TITLE = "Dịch thuật"
-    SUBTITLE = ("Configure Gemini, OpenRouter, DeepSeek or VoxDub. API keys are masked; "
-                "model and Base URL accept custom values.")
-    EXPANDED = {"Provider", "Common parameters"}
+    SUBTITLE = ("Bản dịch do máy chủ VoxDub thực hiện. Điền ngữ cảnh video ở "
+                "đây để kết quả bám đúng chủ đề và cách xưng hô của kênh bạn.")
+    EXPANDED = {"Ngữ cảnh video"}
     SAVE_LABEL = "Lưu cấu hình dịch"
     SAVED_TOAST = "Đã lưu cấu hình dịch."
 

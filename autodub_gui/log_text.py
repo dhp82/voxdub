@@ -333,7 +333,7 @@ _TECH_RE = re.compile(
     | ffmpeg | ffprobe | yt-dlp | ytdlp | demucs | whisper | paraformer
     | vieneu | sherpa | playwright | pydub | torch | pyinstaller
     | gemini | openai | openrouter | anthropic | deepseek | claude | gpt-
-    | fingerprint | idempotency | jobid | saas | bearer
+    | fingerprint | idempotency | jobid | saas | bearer
     | atempo | loudnorm | highpass | filtergraph | setpts | force_style
     | fontsdir | playres | lufs | \bcps\b | kv\s?cache | keep.?alive
     | \bcache\b | \bdebug\b | \bworker\b | \bthread\b | \bluồng\b
